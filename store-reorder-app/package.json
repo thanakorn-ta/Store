@@ -1,0 +1,16 @@
+{
+  "name": "store-reorder-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Apps Script project: recompute Store MIN/MAX from actual usage, confirm with PC owners by email, check budget, draft PR/PO.",
+  "scripts": {
+    "build": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-appsscript.ps1",
+    "push": "npm run build && clasp push",
+    "pull": "clasp pull",
+    "open": "clasp open",
+    "logs": "clasp logs"
+  },
+  "devDependencies": {
+    "@google/clasp": "^2.4.2"
+  }
+}

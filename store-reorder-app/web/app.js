@@ -1,0 +1,610 @@
+/**
+ * app.js
+ * UI for the Store reorder comparison. Runs unchanged in two places:
+ *   - GitHub Pages (static; files parsed in the browser)
+ *   - Apps Script Web App (same page served by HtmlService; see src/Ui.js).
+ *     There, AI calls and "save to Google Sheet" go through google.script.run
+ *     so the API key stays in Script Properties.
+ * Depends on globals from parsers.js / engine.js and SheetJS (XLSX).
+ */
+(() => {
+const STORE_KEY = 'store-reorder-ai:v1';
+const AI_KEY = 'store-reorder-ai:apikey';
+const MERGED_SHEET = 'รวมข้อมูล';
+
+const SLOTS = [
+  { type: 'minmax', no: 1, title: 'MIN/MAX (กรอกเอง)', desc: 'MIN_MAX_Calculated.xlsx', multi: false },
+  { type: 'usage', no: 2, title: 'รวมการใช้ของ', desc: 'รวมการใช้ของ.xlsx หรือ การใช้งานเดือน*.xls ทีละเดือน (หลายไฟล์ได้)', multi: true },
+  { type: 'balance', no: 3, title: 'ยอดคงเหลือสินค้า', desc: 'ยอดคงเหลือสินค้า.xls จาก Store', multi: false },
+  { type: 'reorder', no: 4, title: 'รายงานสินค้าถึงจุดสั่งซื้อ', desc: 'รายงานสินค้าถึงจุดสั่งซื้อ.xls จาก Store', multi: false },
+  { type: 'baseline', no: '±', title: 'ไฟล์รวมรอบก่อน (ไม่บังคับ)', desc: 'ไฟล์ที่ส่งออกจากระบบนี้รอบก่อน เพื่อเทียบคงเหลือ/ยอดแนะนำกับรอบนี้', multi: false }
+];
+
+const PARSERS = { minmax: parseMinMax, usage: parseUsage, balance: parseBalance, reorder: parseReorder };
+
+let state = load() || { files: {}, opt: { ...DEFAULTS }, cart: {}, qtySource: 'auto' };
+state.opt = { ...DEFAULTS, ...state.opt };
+let merged = { rows: [], months: [] };
+let bySku = new Map();
+let activeTab = 'compare';
+let pendingSlot = null;
+
+// ------------------------------------------------------------ persistence
+
+function load() {
+  try { return JSON.parse(localStorage.getItem(STORE_KEY)); } catch { return null; }
+}
+function save() {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch { /* quota / private mode: keep in memory */ }
+}
+
+// ------------------------------------------------------------ helpers
+
+// Running inside an Apps Script HtmlService page?
+const GAS = typeof google !== 'undefined' && !!(google.script && google.script.run);
+const gasCall = (fn, ...args) => new Promise((resolve, reject) =>
+  google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[fn](...args));
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmt = (n, d = 0) => (n == null || n === '' || isNaN(n)) ? '' : Number(n).toLocaleString('th-TH', { minimumFractionDigits: d, maximumFractionDigits: d });
+const fmt1 = n => (n == null ? '' : (Math.abs(n) < 10 && n % 1 ? fmt(n, 1) : fmt(Math.round(n))));
+const money = n => '฿' + fmt(n);
+const monthLabel = k => { const m = k % 100, y = Math.floor(k / 100); return MONTH_SHORT[m - 1] + (y ? ' ' + String(y).slice(-2) : ''); };
+
+function toast(msg) {
+  const t = $('#toast');
+  t.textContent = msg; t.hidden = false;
+  clearTimeout(toast.t); toast.t = setTimeout(() => (t.hidden = true), 3200);
+}
+
+// ------------------------------------------------------------ file import
+
+function readWorkbook(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => {
+      try { resolve(XLSX.read(new Uint8Array(fr.result), { type: 'array', cellDates: false })); }
+      catch (e) { reject(e); }
+    };
+    fr.onerror = () => reject(fr.error);
+    fr.readAsArrayBuffer(file);
+  });
+}
+
+const sheetRows = ws => XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '', blankrows: true });
+
+async function importFiles(fileList, forcedType = null) {
+  const results = [];
+  for (const file of fileList) {
+    try {
+      const wb = await readWorkbook(file);
+      let type = forcedType, records = null;
+
+      if (wb.SheetNames.includes(MERGED_SHEET) && (!type || type === 'baseline')) {
+        type = 'baseline';
+        records = parseMergedExport(sheetRows(wb.Sheets[MERGED_SHEET]));
+      } else {
+        for (const name of wb.SheetNames) {
+          const rows = sheetRows(wb.Sheets[name]);
+          const t = detectType(rows, file.name);
+          if (!t && !type) continue;
+          const useType = type && type !== 'baseline' ? type : t;
+          if (!PARSERS[useType]) continue;
+          const recs = PARSERS[useType](rows, file.name);
+          if (recs.length) { type = useType; records = (records || []).concat(recs); }
+        }
+      }
+
+      if (!type || !records || !records.length) {
+        results.push(`✗ ${file.name}: อ่านไม่ออกว่าเป็นไฟล์ประเภทไหน หรือไม่พบรหัสสินค้า`);
+        continue;
+      }
+      if (type === 'usage' && records.some(r => !r.month)) {
+        results.push(`⚠ ${file.name}: ${records.filter(r => !r.month).length} แถวไม่รู้ว่าเป็นเดือนไหน (ตั้งชื่อไฟล์ให้มีชื่อเดือน เช่น "การใช้งานเดือน ก.ค.")`);
+      }
+      const entry = { name: file.name, count: records.length, loadedAt: Date.now(), records };
+      const slot = SLOTS.find(s => s.type === type);
+      if (slot.multi) {
+        state.files[type] = (state.files[type] || []).filter(f => f.name !== file.name).concat(entry);
+      } else {
+        state.files[type] = [entry];
+      }
+      results.push(`✓ ${file.name} → ${slot.title} (${records.length} แถว)`);
+    } catch (e) {
+      console.error(e);
+      results.push(`✗ ${file.name}: ${e.message}`);
+    }
+  }
+  save();
+  recompute();
+  toast(results.join('\n'));
+}
+
+function removeFile(type, name) {
+  state.files[type] = (state.files[type] || []).filter(f => f.name !== name);
+  save(); recompute();
+}
+
+// ------------------------------------------------------------ slots UI
+
+function renderSlots() {
+  $('#slots').innerHTML = SLOTS.map(s => {
+    const files = state.files[s.type] || [];
+    return `<div class="slot ${files.length ? 'filled' : ''}" data-slot="${s.type}">
+      <div class="slot-title"><span class="slot-no">${s.no}</span>${esc(s.title)}</div>
+      <div class="slot-desc">${esc(s.desc)}</div>
+      <ul class="slot-files">${files.map(f => `
+        <li><span class="fname" title="${esc(f.name)}">${esc(f.name)}</span>
+          <span class="fmeta">${fmt(f.count)} แถว</span>
+          <button class="icon-btn" data-remove="${esc(f.name)}" title="นำไฟล์ออก" aria-label="นำไฟล์ออก">×</button></li>`).join('')}
+      </ul>
+      <button class="btn sm ghost slot-add" data-pick="${s.type}">${s.multi && files.length ? 'เพิ่มไฟล์' : files.length ? 'เปลี่ยนไฟล์' : 'เลือกไฟล์'}</button>
+    </div>`;
+  }).join('');
+}
+
+$('#slots').addEventListener('click', e => {
+  const pick = e.target.closest('[data-pick]');
+  if (pick) { pendingSlot = pick.dataset.pick; $('#fileInput').multiple = pendingSlot === 'usage'; $('#fileInput').click(); return; }
+  const rm = e.target.closest('[data-remove]');
+  if (rm) removeFile(rm.closest('[data-slot]').dataset.slot, rm.dataset.remove);
+});
+$('#fileInput').addEventListener('change', e => {
+  const files = [...e.target.files];
+  e.target.value = '';
+  if (files.length) importFiles(files, pendingSlot);
+  pendingSlot = null;
+});
+
+// Drop anywhere = auto-detect; drop on a slot = force that slot's type
+document.addEventListener('dragover', e => {
+  e.preventDefault();
+  document.querySelectorAll('.slot').forEach(s => s.classList.toggle('drag', s.contains(e.target)));
+});
+document.addEventListener('dragleave', e => { if (!e.relatedTarget) document.querySelectorAll('.slot').forEach(s => s.classList.remove('drag')); });
+document.addEventListener('drop', e => {
+  e.preventDefault();
+  document.querySelectorAll('.slot').forEach(s => s.classList.remove('drag'));
+  const slot = e.target.closest && e.target.closest('[data-slot]');
+  const files = [...(e.dataTransfer?.files || [])];
+  if (files.length) importFiles(files, slot ? slot.dataset.slot : null);
+});
+
+// ------------------------------------------------------------ compute
+
+function recompute() {
+  const f = t => (state.files[t] || []).flatMap(x => x.records);
+  merged = mergeAll({
+    minmax: f('minmax'), usage: f('usage'), balance: f('balance'), reorder: f('reorder'), baseline: f('baseline')
+  }, state.opt);
+  bySku = new Map(merged.rows.map(r => [r.sku, r]));
+  // drop cart items whose SKU vanished after a file was removed
+  for (const sku of Object.keys(state.cart)) if (!bySku.has(sku)) delete state.cart[sku];
+
+  renderSlots();
+  const has = merged.rows.length > 0;
+  $('#summary').hidden = !has;
+  $('#work').hidden = !has;
+  $('#btnExportAll').disabled = !has;
+  if (!has) return;
+  renderSettings();
+  renderCards();
+  renderPcFilter();
+  renderActive();
+}
+
+function renderSettings() {
+  document.querySelectorAll('[data-opt]').forEach(i => { i.value = state.opt[i.dataset.opt]; });
+}
+document.querySelectorAll('[data-opt]').forEach(i => i.addEventListener('change', () => {
+  const v = parseFloat(i.value);
+  if (!isNaN(v) && v >= 0) { state.opt[i.dataset.opt] = v; save(); recompute(); }
+}));
+
+function renderCards() {
+  const s = summarize(merged.rows);
+  const nM = merged.months.length;
+  const cartVal = Object.entries(state.cart).reduce((a, [sku, c]) => a + c.qty * (bySku.get(sku)?.cost || 0), 0);
+  const missing = SLOTS.filter(x => x.type !== 'baseline' && !(state.files[x.type] || []).length).map(x => x.title);
+  $('#cards').innerHTML = `
+    <div class="card"><div class="k">สินค้าทั้งหมด (รวม 4 ไฟล์)</div><div class="v">${fmt(s.skus)}</div>
+      <div class="s">มูลค่าคงเหลือ ${money(s.stockValue)}</div></div>
+    <div class="card"><div class="k">ข้อมูลการใช้</div><div class="v">${nM} เดือน</div>
+      <div class="s">${nM ? monthLabel(merged.months[0]) + ' – ' + monthLabel(merged.months[nM - 1]) : 'ยังไม่มีไฟล์การใช้'} · ประจำ ${s.regular} / ตามงาน ${s.job}</div></div>
+    <div class="card store"><div class="k">Store แจ้งสั่ง</div><div class="v">${fmt(s.storeCount)}</div>
+      <div class="s">ประมาณ ${money(s.storeValue)}</div></div>
+    <div class="card manual"><div class="k">ตาม MIN/MAX เดิม (กรอกเอง)</div><div class="v">${fmt(s.manualCount)}</div>
+      <div class="s">ประมาณ ${money(s.manualValue)} · Avg สูงเกินจริง ${s.overEstimated} รายการ</div></div>
+    <div class="card actual"><div class="k">ตามยอดใช้จริง</div><div class="v">${fmt(s.actualCount)}</div>
+      <div class="s">ประมาณ ${money(s.actualValue)}</div></div>
+    <div class="card dead"><div class="k">Dead stock</div><div class="v">${fmt(s.dead)}</div>
+      <div class="s">มูลค่าค้าง ${money(s.deadValue)}</div></div>
+    <div class="card"><div class="k">เลือกสั่งแล้ว</div><div class="v">${fmt(Object.keys(state.cart).length)}</div>
+      <div class="s">ประมาณ ${money(cartVal)}</div></div>
+    ${missing.length ? `<div class="card"><div class="k">ยังไม่ได้นำเข้า</div><div class="s" style="color:var(--warn)">${missing.map(esc).join('<br>')}</div></div>` : ''}`;
+  $('#cartBadge').textContent = Object.keys(state.cart).length;
+}
+
+function renderPcFilter() {
+  const sel = $('#fPc'), cur = sel.value;
+  const pcs = new Map();
+  merged.rows.forEach(r => { const k = r.pc || r.group || ''; if (k && !pcs.has(k)) pcs.set(k, r.pc ? r.pcName : ''); });
+  sel.innerHTML = '<option value="">ทุก PC</option>' +
+    [...pcs].sort().map(([k, n]) => `<option value="${esc(k)}">${esc(k)} ${esc(n)}</option>`).join('');
+  sel.value = cur;
+}
+
+// ------------------------------------------------------------ filtering
+
+function filtered(mode) {
+  const q = $('#fSearch').value.trim().toLowerCase();
+  const pc = $('#fPc').value, cat = $('#fCat').value, show = mode || $('#fShow').value;
+  return merged.rows.filter(r => {
+    if (q && !(r.sku.toLowerCase().includes(q) || r.name.toLowerCase().includes(q))) return false;
+    if (pc && (r.pc || r.group) !== pc) return false;
+    if (cat && r.category !== cat) return false;
+    const any = r.orderStore > 0 || r.orderManual > 0 || r.orderActual > 0;
+    switch (show) {
+      case 'any': return any || !!state.cart[r.sku];
+      case 'diff': return any && !(r.orderStore === r.orderManual && r.orderManual === r.orderActual);
+      case 'store': return r.orderStore > 0;
+      case 'actual': return r.orderActual > 0;
+      case 'flag': return r.flags.length > 0;
+      default: return true;
+    }
+  });
+}
+['#fSearch', '#fPc', '#fCat', '#fShow'].forEach(s => $(s).addEventListener('input', () => renderActive()));
+$('#qtySource').value = state.qtySource;
+$('#qtySource').addEventListener('change', e => { state.qtySource = e.target.value; save(); });
+
+// ------------------------------------------------------------ tabs
+
+document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => {
+  activeTab = t.dataset.tab;
+  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === t));
+  document.querySelectorAll('.tabpane').forEach(p => (p.hidden = p.id !== 'tab-' + activeTab));
+  $('#filters').hidden = activeTab === 'cart' || activeTab === 'ai';
+  renderActive();
+}));
+
+function renderActive() {
+  if (activeTab === 'compare') renderCompare();
+  else if (activeTab === 'merged') renderMerged();
+  else if (activeTab === 'cart') renderCart();
+}
+
+// ------------------------------------------------------------ compare table
+
+const catTag = c => c ? `<span class="tag ${{ [CATEGORY.REGULAR]: 'reg', [CATEGORY.JOB]: 'job', [CATEGORY.DEAD]: 'dead' }[c] || 'none'}">${esc(c)}</span>` : '';
+const o = n => `<span class="${n > 0 ? '' : 'zero'}">${n > 0 ? fmt(n) : '0'}</span>`;
+
+function spark(r) {
+  if (!r.months.length) return '';
+  const vals = r.months.map(k => r.usageByMonth[k] || 0);
+  const mx = Math.max(...vals, 1);
+  const title = r.months.map((k, i) => `${monthLabel(k)}: ${fmt(vals[i])}`).join('\n');
+  return `<span class="spark" title="${esc(title)}">${vals.map(v => `<b class="${v ? '' : 'z'}" style="height:${Math.max(1, Math.round(v / mx * 18))}px"></b>`).join('')}</span>`;
+}
+
+function renderCompare() {
+  const rows = filtered();
+  const hasBase = rows.some(r => r.base);
+  $('#countInfo').textContent = `แสดง ${fmt(rows.length)} จาก ${fmt(merged.rows.length)} รายการ`;
+  if (!rows.length) { $('#tblCompare').innerHTML = '<tbody><tr><td class="empty">ไม่มีรายการตามเงื่อนไข</td></tr></tbody>'; return; }
+
+  $('#tblCompare').innerHTML = `
+    <thead>
+      <tr class="grp"><th colspan="4"></th><th colspan="3">การใช้ / คงเหลือ</th>
+        <th colspan="2" class="col-manual">MIN / MAX</th>
+        <th colspan="3">ยอดแนะนำสั่ง</th>${hasBase ? '<th colspan="2">เทียบรอบก่อน</th>' : ''}<th colspan="2"></th></tr>
+      <tr class="sub">
+        <th title="เลือกเพื่อสั่งซื้อ">สั่ง</th><th>รหัส</th><th>สินค้า</th><th>ประเภท</th>
+        <th class="n">คงเหลือ</th><th class="n" title="Avg/เดือน ที่กรอกเอง → ใช้จริงเฉลี่ย">Avg เดิม → จริง</th><th>รายเดือน</th>
+        <th class="n col-manual">เดิม</th><th class="n col-actual">จากใช้จริง</th>
+        <th class="n col-store">Store</th><th class="n col-manual">MIN/MAX เดิม</th><th class="n col-actual">ใช้จริง</th>
+        ${hasBase ? '<th class="n">คงเหลือก่อน</th><th class="n">Δ</th>' : ''}
+        <th class="n">จำนวนสั่ง</th><th>ข้อสังเกต</th>
+      </tr>
+    </thead>
+    <tbody>${rows.map(r => {
+      const c = state.cart[r.sku];
+      const m = r.manual;
+      const d = r.base ? r.balance - r.base.balance : null;
+      return `<tr data-sku="${r.sku}" class="${c ? 'sel' : ''}">
+        <td><input type="checkbox" data-pick-sku ${c ? 'checked' : ''} aria-label="เลือก ${esc(r.sku)}"></td>
+        <td class="sku">${r.sku}<div class="pc">${esc(r.pc || r.group)}</div></td>
+        <td class="name">${esc(r.name)}<div class="pc">${esc(r.unit)}${r.cost ? ' · ' + money(r.cost) + '/หน่วย' : ''}</div></td>
+        <td>${catTag(r.category)}</td>
+        <td class="n">${fmt(r.balance)}</td>
+        <td class="n"><span class="dim">${m ? fmt1(m.avg) : '–'}</span> → ${fmt1(r.avgActual)}</td>
+        <td>${spark(r)}</td>
+        <td class="n col-manual">${m && m.min != null ? `${fmt(m.min)} / ${fmt(m.max)}` : '<span class="dim">–</span>'}</td>
+        <td class="n col-actual">${r.minNew != null ? `${fmt(r.minNew)} / ${fmt(r.maxNew)}` : '<span class="dim">–</span>'}</td>
+        <td class="n o col-store">${r.store ? o(r.orderStore) : '<span class="dim">–</span>'}</td>
+        <td class="n o col-manual">${m ? o(r.orderManual) : '<span class="dim">–</span>'}</td>
+        <td class="n o col-actual">${r.nMonths ? o(r.orderActual) : '<span class="dim">–</span>'}</td>
+        ${hasBase ? `<td class="n dim">${r.base ? fmt(r.base.balance) : ''}</td>
+          <td class="n delta ${d > 0 ? 'up' : d < 0 ? 'down' : ''}">${d == null ? '' : (d > 0 ? '+' : '') + fmt(d)}</td>` : ''}
+        <td class="n"><input class="qty" type="number" min="0" step="1" data-qty value="${c ? c.qty : ''}" ${c ? '' : 'disabled'} aria-label="จำนวนสั่ง"></td>
+        <td class="flags">${r.flags.map(f => `<div>${esc(f)}</div>`).join('')}</td>
+      </tr>`;
+    }).join('')}</tbody>`;
+}
+
+function setPicked(sku, on) {
+  const r = bySku.get(sku);
+  if (!r) return;
+  if (on) state.cart[sku] = state.cart[sku] || { qty: defaultQty(r, state.qtySource), note: '' };
+  else delete state.cart[sku];
+}
+
+$('#tblCompare').addEventListener('change', e => {
+  const tr = e.target.closest('tr[data-sku]');
+  if (!tr) return;
+  const sku = tr.dataset.sku;
+  if (e.target.matches('[data-pick-sku]')) {
+    setPicked(sku, e.target.checked);
+    tr.classList.toggle('sel', e.target.checked);
+    const q = tr.querySelector('[data-qty]');
+    q.disabled = !e.target.checked;
+    q.value = e.target.checked ? state.cart[sku].qty : '';
+    if (e.target.checked) q.select();
+  } else if (e.target.matches('[data-qty]') && state.cart[sku]) {
+    state.cart[sku].qty = Math.max(0, Math.round(Number(e.target.value) || 0));
+  }
+  save(); renderCards();
+});
+
+document.querySelectorAll('[data-bulk]').forEach(b => b.addEventListener('click', () => {
+  const mode = b.dataset.bulk;
+  const rows = filtered();
+  for (const r of rows) {
+    if (mode === 'none') setPicked(r.sku, false);
+    else if (mode === 'visible') setPicked(r.sku, true);
+    else if (mode === 'actual' && r.orderActual > 0) setPicked(r.sku, true);
+    else if (mode === 'store' && r.orderStore > 0) setPicked(r.sku, true);
+  }
+  save(); renderCards(); renderCompare();
+}));
+
+// ------------------------------------------------------------ merged table
+
+function mergedColumns() {
+  const cols = [
+    ['รหัสสินค้า', r => r.sku], ['สินค้า', r => r.name], ['PC', r => r.pc], ['ชื่อ PC', r => r.pcName],
+    ['กลุ่ม (ไฟล์การใช้/MIN-MAX)', r => r.group], ['หน่วย', r => r.unit], ['ที่เก็บ', r => r.location],
+    ['คงเหลือ', r => r.balance, 1], ['ต้นทุน/หน่วย', r => r.cost, 1], ['มูลค่าคงเหลือ', r => r.value, 1]
+  ];
+  for (const k of merged.months) cols.push([monthLabel(k), r => r.usageByMonth[k] || 0, 1, 'm']);
+  cols.push(
+    ['ใช้รวม', r => r.usageTotal, 1], ['เดือนที่มีการเบิก', r => r.monthsUsed, 1],
+    ['เฉลี่ยใช้จริง/เดือน', r => Math.round(r.avgActual * 100) / 100, 1],
+    ['Avg กรอกเอง', r => r.manual ? r.manual.avg : '', 1],
+    ['Avg เดิม ÷ จริง', r => r.ratio == null ? '' : (r.ratio === Infinity ? 'ใช้จริง 0' : Math.round(r.ratio * 10) / 10), 1],
+    ['ประเภท', r => r.category], ['Lead time', r => r.lead, 1],
+    ['MIN เดิม', r => r.manual?.min ?? '', 1], ['MAX เดิม', r => r.manual?.max ?? '', 1],
+    ['Safety ใหม่', r => r.safetyNew ?? '', 1], ['MIN ใหม่', r => r.minNew ?? '', 1], ['MAX ใหม่', r => r.maxNew ?? '', 1],
+    ['คงพอใช้ (เดือน)', r => r.coverMonths == null ? '' : Math.round(r.coverMonths * 10) / 10, 1],
+    ['Store: จุดต่ำสุด', r => r.store ? r.store.min : '', 1],
+    ['Store แจ้งสั่ง', r => r.store ? r.orderStore : '', 1],
+    ['Store: สั่งต่อครั้ง', r => r.store ? r.store.lot : ''],
+    ['แนะนำสั่ง (MIN/MAX เดิม)', r => r.orderManual, 1],
+    ['แนะนำสั่ง (ใช้จริง)', r => r.orderActual, 1],
+    ['เลือกสั่ง', r => state.cart[r.sku]?.qty ?? '', 1],
+    ['มีในไฟล์', r => ['minmax', 'usage', 'balance', 'reorder'].filter(k => r.sources[k]).map(k => ({ minmax: '1', usage: '2', balance: '3', reorder: '4' }[k])).join(',')],
+    ['ข้อสังเกต', r => r.flags.join(' | ')]
+  );
+  return cols;
+}
+
+function renderMerged() {
+  const rows = filtered();
+  const cols = mergedColumns();
+  const show = rows.slice(0, 1500);
+  $('#tblMerged').innerHTML = `<thead><tr class="sub" style="top:0">${cols.map(c => `<th class="${c[2] ? 'n' : ''}" style="top:0">${esc(c[0])}</th>`).join('')}</tr></thead>
+    <tbody>${show.map(r => `<tr>${cols.map(c => {
+      const v = c[1](r);
+      return `<td class="${c[2] ? 'n' : ''} ${c[0] === 'สินค้า' ? 'name' : ''} ${c[3] === 'm' && !v ? 'zero' : ''}">${esc(typeof v === 'number' ? fmt(v, v % 1 ? 1 : 0) : v)}</td>`;
+    }).join('')}</tr>`).join('')}</tbody>`;
+}
+
+// ------------------------------------------------------------ cart
+
+function cartRows() {
+  return Object.entries(state.cart)
+    .map(([sku, c]) => ({ r: bySku.get(sku), c }))
+    .filter(x => x.r)
+    .sort((a, b) => (a.r.pc || a.r.group || 'zz').localeCompare(b.r.pc || b.r.group || 'zz') || a.r.sku.localeCompare(b.r.sku));
+}
+
+function renderCart() {
+  const items = cartRows();
+  const total = items.reduce((a, x) => a + x.c.qty * x.r.cost, 0);
+  $('#cartTotal').textContent = items.length ? `${items.length} รายการ · ประมาณ ${money(total)}` : '';
+  if (!items.length) { $('#cartBody').innerHTML = '<div class="empty">ยังไม่ได้เลือกรายการ — ติ๊กช่อง "สั่ง" ในแท็บเทียบยอดสั่งซื้อ</div>'; return; }
+
+  const groups = new Map();
+  for (const x of items) {
+    const k = x.r.pc ? `${x.r.pc} ${x.r.pcName}` : (x.r.group || 'ไม่ระบุ PC');
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(x);
+  }
+  $('#cartBody').innerHTML = [...groups].map(([g, list]) => {
+    const sub = list.reduce((a, x) => a + x.c.qty * x.r.cost, 0);
+    return `<div class="cart-group"><h3><span>${esc(g)}</span><span class="num">${money(sub)}</span></h3>
+      <div class="table-wrap" style="max-height:none"><table class="grid"><thead><tr>
+        <th>รหัส</th><th>สินค้า</th><th class="n">คงเหลือ</th><th class="n col-store">Store</th><th class="n col-manual">MIN/MAX เดิม</th>
+        <th class="n col-actual">ใช้จริง</th><th class="n">จำนวนสั่ง</th><th>หน่วย</th><th class="n">ราคา/หน่วย</th><th class="n">รวม</th><th>หมายเหตุ</th><th></th>
+      </tr></thead><tbody>${list.map(({ r, c }) => `<tr data-sku="${r.sku}">
+        <td class="sku">${r.sku}</td><td class="name">${esc(r.name)}${r.category === CATEGORY.JOB ? ' ' + catTag(r.category) : ''}</td>
+        <td class="n">${fmt(r.balance)}</td><td class="n col-store">${o(r.orderStore)}</td><td class="n col-manual">${o(r.orderManual)}</td><td class="n col-actual">${o(r.orderActual)}</td>
+        <td class="n"><input class="qty" type="number" min="0" step="1" data-qty value="${c.qty}"></td>
+        <td>${esc(r.unit)}</td><td class="n">${fmt(r.cost, 2)}</td><td class="n">${fmt(c.qty * r.cost, 2)}</td>
+        <td><input class="note" data-note value="${esc(c.note)}" placeholder="เช่น ใช้งานโปรเจกต์…"></td>
+        <td><button class="icon-btn" data-unpick title="เอาออก" aria-label="เอาออก">×</button></td>
+      </tr>`).join('')}</tbody></table></div></div>`;
+  }).join('');
+}
+
+$('#cartBody').addEventListener('change', e => {
+  const tr = e.target.closest('tr[data-sku]');
+  if (!tr || !state.cart[tr.dataset.sku]) return;
+  if (e.target.matches('[data-qty]')) state.cart[tr.dataset.sku].qty = Math.max(0, Math.round(Number(e.target.value) || 0));
+  if (e.target.matches('[data-note]')) state.cart[tr.dataset.sku].note = e.target.value;
+  save(); renderCards(); renderCart();
+});
+$('#cartBody').addEventListener('click', e => {
+  if (!e.target.matches('[data-unpick]')) return;
+  delete state.cart[e.target.closest('tr').dataset.sku];
+  save(); renderCards(); renderCart();
+});
+$('#btnClearCart').addEventListener('click', () => {
+  if (!confirm('ล้างรายการที่เลือกทั้งหมด?')) return;
+  state.cart = {}; save(); renderCards(); renderCart();
+});
+
+function cartSheetRows() {
+  return cartRows().map(({ r, c }) => ({
+    'PC': r.pc, 'ชื่อ PC': r.pcName || r.group, 'รหัสสินค้า': r.sku, 'สินค้า': r.name, 'หน่วย': r.unit,
+    'คงเหลือ': r.balance, 'จำนวนสั่ง': c.qty, 'ราคา/หน่วย': r.cost, 'รวมเงิน': Math.round(c.qty * r.cost * 100) / 100,
+    'Store แจ้ง': r.orderStore, 'MIN/MAX เดิม': r.orderManual, 'ใช้จริง': r.orderActual,
+    'ประเภท': r.category, 'หมายเหตุ': c.note
+  }));
+}
+
+const stamp = () => new Date().toISOString().slice(0, 10);
+
+$('#btnExportCart').addEventListener('click', () => {
+  const rows = cartSheetRows();
+  if (!rows.length) return toast('ยังไม่ได้เลือกรายการ');
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'รายการที่เลือกสั่งซื้อ');
+  XLSX.writeFile(wb, `ใบขอซื้อ_${stamp()}.xlsx`);
+});
+$('#btnCopyCart').addEventListener('click', async () => {
+  const txt = cartSheetRows().map(x => `${x.PC}\t${x['รหัสสินค้า']}\t${x['สินค้า']}\t${x['จำนวนสั่ง']}\t${x['หน่วย']}\t${x['หมายเหตุ']}`).join('\n');
+  try { await navigator.clipboard.writeText(txt); toast('คัดลอกแล้ว วางใน Excel/อีเมลได้เลย'); } catch { toast('คัดลอกไม่สำเร็จ'); }
+});
+
+// ------------------------------------------------------------ export all
+
+$('#btnExportAll').addEventListener('click', () => {
+  const cols = mergedColumns();
+  const toObj = r => Object.fromEntries(cols.map(c => [c[0], c[1](r)]));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(merged.rows.map(toObj)), MERGED_SHEET);
+  const cmp = merged.rows.filter(r => r.orderStore > 0 || r.orderManual > 0 || r.orderActual > 0).map(r => ({
+    'รหัสสินค้า': r.sku, 'สินค้า': r.name, 'PC': r.pc || r.group, 'ประเภท': r.category, 'คงเหลือ': r.balance,
+    'Store แจ้งสั่ง': r.orderStore, 'MIN/MAX เดิม': r.orderManual, 'ใช้จริง': r.orderActual,
+    'ต่างกัน (Store - ใช้จริง)': r.orderStore - r.orderActual,
+    'มูลค่า Store': Math.round(r.orderStore * r.cost), 'มูลค่าใช้จริง': Math.round(r.orderActual * r.cost),
+    'ข้อสังเกต': r.flags.join(' | ')
+  }));
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(cmp), 'เทียบยอดสั่ง');
+  const cart = cartSheetRows();
+  if (cart.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(cart), 'รายการที่เลือกสั่งซื้อ');
+  const src = SLOTS.flatMap(s => (state.files[s.type] || []).map(f => ({ 'ช่อง': s.title, 'ไฟล์': f.name, 'แถว': f.count })));
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(src), 'ไฟล์ต้นทาง');
+  XLSX.writeFile(wb, `Store_รวมข้อมูล_${stamp()}.xlsx`);
+});
+
+$('#btnReset').addEventListener('click', () => {
+  if (!confirm('ล้างไฟล์ที่นำเข้าและรายการที่เลือกทั้งหมด?')) return;
+  state = { files: {}, opt: { ...DEFAULTS }, cart: {}, qtySource: 'auto' };
+  save(); recompute();
+});
+
+// ------------------------------------------------------------ AI assistant
+
+$('.ai-key').hidden = GAS; // Apps Script uses ANTHROPIC_API_KEY from Script Properties
+try { $('#aiKey').value = localStorage.getItem(AI_KEY) || ''; } catch { /* ignore */ }
+$('#aiKey').addEventListener('change', e => { try { localStorage.setItem(AI_KEY, e.target.value.trim()); } catch { /* ignore */ } });
+$('#aiKeyClear').addEventListener('click', () => { $('#aiKey').value = ''; try { localStorage.removeItem(AI_KEY); } catch { /* ignore */ } });
+document.querySelectorAll('[data-ask]').forEach(b => b.addEventListener('click', () => { $('#aiQ').value = b.dataset.ask; askAI(); }));
+$('#aiAsk').addEventListener('click', askAI);
+
+function aiContext() {
+  const s = summarize(merged.rows);
+  const line = r => [r.sku, r.name, r.pc || r.group, r.category, r.balance, r.unit, r.cost,
+    r.manual ? r.manual.avg : '', Math.round(r.avgActual * 10) / 10, r.orderStore, r.orderManual, r.orderActual,
+    state.cart[r.sku]?.qty ?? '', r.flags.join('; ')].join('\t');
+  const head = 'sku\tname\tpc\tcategory\tbalance\tunit\tunit_cost\tavg_manual\tavg_actual\torder_store\torder_minmax_old\torder_actual\tselected_qty\tflags';
+  const interesting = merged.rows
+    .filter(r => r.flags.length || r.orderStore || r.orderActual || r.orderManual || state.cart[r.sku])
+    .sort((a, b) => Math.max(b.orderStore, b.orderActual, b.orderManual) * b.cost - Math.max(a.orderStore, a.orderActual, a.orderManual) * a.cost)
+    .slice(0, 250);
+  return `เดือนที่มีข้อมูลการใช้: ${merged.months.map(monthLabel).join(', ')}
+สรุป: ${JSON.stringify(s)}
+สูตร: MIN=${state.opt.factorMin}×(avg/30)×lead, MAX=${state.opt.factorMax}×(avg/30)×lead, เบิกประจำ=ใช้≥${state.opt.regularMinMonths} เดือน
+รายการ (${interesting.length} จาก ${merged.rows.length}, เรียงตามมูลค่าที่ต้องสั่ง):
+${head}
+${interesting.map(line).join('\n')}`;
+}
+
+const AI_SYSTEM = 'คุณคือผู้ช่วยฝ่ายจัดซื้อ/Store ของ Plan B Media ทีม Static Media (PG44) ตอบเป็นภาษาไทย กระชับ ' +
+  'ใช้เฉพาะตัวเลขที่ให้มา ห้ามแต่งตัวเลขเพิ่ม ถ้าข้อมูลไม่พอให้บอกตรงๆ ' +
+  'order_store = ยอดที่ระบบ Store แจ้ง, order_minmax_old = จาก MIN/MAX ที่กรอกเอง, order_actual = จาก MIN/MAX ที่คำนวณจากยอดเบิกจริง. ' +
+  'เบิกตามงาน = ไม่ควรตั้งจุดสั่งซื้อตายตัว ต้องถามทีมก่อน. คำแนะนำของคุณเป็นข้อเสนอให้คนตัดสินใจเท่านั้น';
+
+/** Browser-direct call (GitHub Pages): uses the viewer's own key. */
+async function askClaudeBrowser(key, userContent) {
+  const { default: Anthropic } = await import('https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk/+esm');
+  const client = new Anthropic({ apiKey: key, dangerouslyAllowBrowser: true });
+  const res = await client.beta.messages.create({
+    model: 'claude-opus-5',
+    max_tokens: 16000,
+    betas: ['server-side-fallback-2026-07-01'],
+    fallbacks: 'default',
+    system: AI_SYSTEM,
+    messages: [{ role: 'user', content: userContent }]
+  });
+  if (res.stop_reason === 'refusal') throw new Error('AI ปฏิเสธคำขอนี้');
+  return res.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+}
+
+async function askAI() {
+  const key = $('#aiKey').value.trim();
+  const q = $('#aiQ').value.trim();
+  if (!GAS && !key) return toast('ใส่ Anthropic API key ก่อน');
+  if (!q) return toast('พิมพ์คำถามก่อน');
+  if (!merged.rows.length) return toast('ยังไม่มีข้อมูล');
+  $('#aiAsk').disabled = true; $('#aiStatus').textContent = 'กำลังวิเคราะห์…'; $('#aiOut').textContent = '';
+  const userContent = `ข้อมูลรอบนี้:\n${aiContext()}\n\nคำถาม: ${q}`;
+  try {
+    // Apps Script: key lives in Script Properties, request goes out via UrlFetchApp (src/Ui.js)
+    $('#aiOut').textContent = GAS
+      ? await gasCall('askClaudeFromUi', AI_SYSTEM, userContent)
+      : await askClaudeBrowser(key, userContent);
+    $('#aiStatus').textContent = '';
+  } catch (e) {
+    console.error(e);
+    $('#aiStatus').textContent = 'ผิดพลาด: ' + (e.status === 401 ? 'API key ไม่ถูกต้อง' : e.message);
+  } finally {
+    $('#aiAsk').disabled = false;
+  }
+}
+
+// ------------------------------------------------------------ Apps Script only: save to Google Sheet
+
+$('#btnSaveSheet').hidden = !GAS;
+$('#btnSaveSheet').addEventListener('click', async () => {
+  const rows = cartSheetRows();
+  if (!rows.length) return toast('ยังไม่ได้เลือกรายการ');
+  if (!confirm(`บันทึก ${rows.length} รายการลง Google Sheet (ชีต reorder_queue สถานะ "รอส่งอีเมล")?`)) return;
+  $('#btnSaveSheet').disabled = true;
+  try {
+    const res = await gasCall('saveSelectionToQueue', rows);
+    toast(`บันทึกแล้ว ${res.count} รายการ`);
+  } catch (e) {
+    toast('บันทึกไม่สำเร็จ: ' + e.message);
+  } finally {
+    $('#btnSaveSheet').disabled = false;
+  }
+});
+
+// ------------------------------------------------------------ boot
+
+recompute();
+})();

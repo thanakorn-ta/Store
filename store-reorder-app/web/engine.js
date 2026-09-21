@@ -1,0 +1,175 @@
+/**
+ * engine.js
+ * Merges the 4 sources into one row per SKU and computes three order
+ * suggestions side by side so they can be compared:
+ *
+ *   orderStore  : Store's own "ต้องซื้ออย่างน้อย" from the reorder report
+ *   orderManual : from the hand-entered MIN/MAX file (MAX - balance when balance <= MIN)
+ *   orderActual : from MIN/MAX recomputed on real withdrawals (same formula as
+ *                 the Apps Script MinMax.js so both stay consistent)
+ *
+ * The "actual" suggestion only applies to regular items. Project-driven
+ * items and dead stock get 0 and a note — a person decides.
+ */
+
+const DEFAULTS = {
+  factorSafety: 0.5,
+  factorMin: 1.5,
+  factorMax: 2.5,
+  leadDays: 30,
+  regularMinMonths: 4
+};
+
+const CATEGORY = {
+  REGULAR: 'เบิกประจำ',
+  JOB: 'เบิกตามงาน',
+  DEAD: 'Dead stock',
+  NONE: 'ไม่มีการเคลื่อนไหว'
+};
+
+function monthKey(u) {
+  return (u.year ? u.year * 100 : 0) + u.month;
+}
+
+function mergeAll({ minmax = [], usage = [], balance = [], reorder = [], baseline = [] }, opt = DEFAULTS) {
+  const rows = new Map();
+  const get = sku => {
+    if (!rows.has(sku)) {
+      rows.set(sku, {
+        sku, name: '', unit: '', pc: '', pcName: '', group: '', location: '',
+        balance: 0, cost: 0, value: 0, inBalance: false,
+        usageByMonth: {}, usageTotal: 0, usageValue: 0, lastPrice: 0,
+        manual: null, store: null, base: null
+      });
+    }
+    return rows.get(sku);
+  };
+
+  for (const b of balance) {
+    const r = get(b.sku);
+    r.name = r.name || b.name; r.unit = r.unit || b.unit;
+    r.pc = r.pc || b.pc; r.pcName = r.pcName || b.pcName;
+    r.location = r.location ? (r.location.includes(b.location) ? r.location : r.location + ', ' + b.location) : b.location;
+    r.balance += b.balance; r.value += b.value;
+    if (b.cost) r.cost = b.cost;
+    r.inBalance = true;
+  }
+
+  const monthSet = new Set();
+  for (const u of usage) {
+    if (!u.month) continue;
+    const k = monthKey(u);
+    monthSet.add(k);
+    const r = get(u.sku);
+    r.name = r.name || u.name; r.unit = r.unit || u.unit; r.group = r.group || u.group;
+    r.usageByMonth[k] = (r.usageByMonth[k] || 0) + u.qty;
+    r.usageTotal += u.qty;
+    r.usageValue += u.total;
+    if (u.price) r.lastPrice = u.price;
+  }
+
+  for (const m of minmax) {
+    const r = get(m.sku);
+    r.name = r.name || m.name; r.unit = r.unit || m.unit; r.group = r.group || m.group;
+    r.manual = m;
+  }
+
+  for (const s of reorder) {
+    const r = get(s.sku);
+    r.name = r.name || s.name; r.unit = r.unit || s.unit;
+    r.pc = r.pc || s.pc; r.pcName = r.pcName || s.pcName;
+    r.store = s;
+  }
+
+  const baseMap = new Map(baseline.map(b => [b.sku, b]));
+  const months = [...monthSet].sort((a, b) => a - b);
+  const nMonths = months.length || 0;
+
+  const out = [];
+  for (const r of rows.values()) {
+    if (!r.cost) r.cost = r.lastPrice;
+    // Balance file is the source of truth for stock; fall back to the reorder
+    // report's figure only when the balance file wasn't loaded / lacks the SKU.
+    if (!r.inBalance && r.store) r.balance = r.store.balance;
+
+    const monthsUsed = months.filter(k => (r.usageByMonth[k] || 0) > 0).length;
+    const avgActual = nMonths ? r.usageTotal / nMonths : 0;
+    const lead = (r.manual && r.manual.lead) || opt.leadDays;
+    const perDay = avgActual / 30;
+
+    let category;
+    if (!nMonths) category = '';
+    else if (r.usageTotal <= 0) category = r.balance > 0 ? CATEGORY.DEAD : CATEGORY.NONE;
+    else if (monthsUsed >= opt.regularMinMonths) category = CATEGORY.REGULAR;
+    else category = CATEGORY.JOB;
+
+    let minNew = null, maxNew = null, safetyNew = null;
+    if (category === CATEGORY.REGULAR) {
+      safetyNew = Math.ceil(opt.factorSafety * perDay * lead);
+      minNew = Math.ceil(opt.factorMin * perDay * lead);
+      maxNew = Math.ceil(opt.factorMax * perDay * lead);
+    }
+
+    const orderActual = minNew != null && r.balance <= minNew ? Math.max(0, maxNew - r.balance) : 0;
+    const m = r.manual;
+    const orderManual = m && m.min != null && m.max != null && r.balance <= m.min ? Math.max(0, m.max - r.balance) : 0;
+    const orderStore = r.store ? r.store.need : 0;
+
+    const ratio = m && m.avg && avgActual ? m.avg / avgActual : (m && m.avg && nMonths ? Infinity : null);
+
+    const flags = [];
+    if (category === CATEGORY.DEAD) flags.push('ไม่ถูกเบิกเลยในช่วงข้อมูล');
+    if (category === CATEGORY.JOB) flags.push('เบิกตามงาน ต้องถามทีมก่อนสั่ง');
+    if (ratio != null && ratio >= 1.5) flags.push(`Avg ที่กรอกเอง สูงกว่าใช้จริง ${ratio === Infinity ? '(ใช้จริง 0)' : ratio.toFixed(1) + ' เท่า'}`);
+    if (ratio != null && ratio > 0 && ratio <= 0.67) flags.push(`Avg ที่กรอกเอง ต่ำกว่าใช้จริง ${(1 / ratio).toFixed(1)} เท่า`);
+    if (orderStore > 0 && orderActual === 0 && category !== CATEGORY.JOB) flags.push('Store แจ้งสั่ง แต่ยอดใช้จริงไม่ถึงจุดสั่ง');
+    if (orderActual > 0 && orderStore === 0) flags.push('ยอดใช้จริงถึงจุดสั่ง แต่ Store ไม่ได้แจ้ง');
+    if (r.store && r.inBalance && r.store.balance !== r.balance) flags.push(`คงเหลือในรายงานสั่งซื้อ (${r.store.balance}) ≠ ไฟล์คงเหลือ`);
+
+    const base = baseMap.get(r.sku) || null;
+
+    out.push({
+      ...r,
+      months, monthsUsed, nMonths, avgActual, lead, category,
+      safetyNew, minNew, maxNew,
+      orderActual, orderManual, orderStore,
+      ratio, flags, base,
+      sources: {
+        minmax: !!r.manual, usage: r.usageTotal > 0 || months.some(k => k in r.usageByMonth),
+        balance: r.inBalance, reorder: !!r.store
+      },
+      coverMonths: avgActual > 0 ? r.balance / avgActual : null
+    });
+  }
+  out.sort((a, b) => (a.pc || 'zz').localeCompare(b.pc || 'zz') || a.sku.localeCompare(b.sku));
+  return { rows: out, months };
+}
+
+/** Default quantity pre-filled when a user ticks an item. */
+function defaultQty(r, source) {
+  if (source === 'store') return r.orderStore;
+  if (source === 'manual') return r.orderManual;
+  if (source === 'actual') return r.orderActual;
+  // auto: actual when computable, else Store's figure
+  return r.orderActual || r.orderStore || r.orderManual || 0;
+}
+
+function summarize(rows) {
+  const s = {
+    skus: rows.length, stockValue: 0,
+    regular: 0, job: 0, dead: 0, deadValue: 0,
+    storeCount: 0, storeValue: 0, manualCount: 0, manualValue: 0, actualCount: 0, actualValue: 0,
+    overEstimated: 0
+  };
+  for (const r of rows) {
+    s.stockValue += r.value;
+    if (r.category === CATEGORY.REGULAR) s.regular++;
+    if (r.category === CATEGORY.JOB) s.job++;
+    if (r.category === CATEGORY.DEAD) { s.dead++; s.deadValue += r.value; }
+    if (r.orderStore > 0) { s.storeCount++; s.storeValue += r.orderStore * r.cost; }
+    if (r.orderManual > 0) { s.manualCount++; s.manualValue += r.orderManual * r.cost; }
+    if (r.orderActual > 0) { s.actualCount++; s.actualValue += r.orderActual * r.cost; }
+    if (r.ratio != null && r.ratio >= 1.5) s.overEstimated++;
+  }
+  return s;
+}
