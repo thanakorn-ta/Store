@@ -562,6 +562,78 @@ function logActivity_(step, status, message) {
   sheet.appendRow([new Date(), step, status, message]);
 }
 
+// ============================================================ MasterPc.js
+/**
+ * MasterPc.js
+ * "Master: PC → อีเมลผู้รับผิดชอบ" in the workflow diagram. One row per PC:
+ * who confirms the suggested order (owner_emails, comma separated) and who
+ * approves when it goes over budget (manager_email). default_budget_key
+ * pre-selects the budget line when the PC owner confirms.
+ * Edited in the Admin tab (or directly in the master_pc sheet).
+ */
+
+var MASTER_PC_HEADER = ['pc_code', 'pc_name', 'owner_emails', 'manager_email', 'default_budget_key', 'note'];
+
+function readMasterPc_(ss) {
+  var out = {};
+  readSheetAsObjects_(ss, CONFIG.SHEETS.MASTER_PC).forEach(function (p) {
+    if (!p.pc_code) return;
+    out[String(p.pc_code)] = {
+      pc_code: String(p.pc_code), pc_name: String(p.pc_name || ''),
+      owner_emails: splitEmails_(p.owner_emails), manager_email: String(p.manager_email || '').trim().toLowerCase(),
+      default_budget_key: String(p.default_budget_key || ''), note: String(p.note || '')
+    };
+  });
+  return out;
+}
+
+function splitEmails_(s) {
+  return String(s || '').split(/[,;\s]+/).map(function (e) { return e.trim().toLowerCase(); }).filter(function (e) { return /@/.test(e); });
+}
+
+function listMasterPc() {
+  requireActive_();
+  var map = readMasterPc_(db_());
+  return Object.keys(map).sort().map(function (k) {
+    var p = map[k];
+    return { pc_code: p.pc_code, pc_name: p.pc_name, owner_emails: p.owner_emails.join(', '),
+      manager_email: p.manager_email, default_budget_key: p.default_budget_key, note: p.note };
+  });
+}
+
+/** Upsert one PC row (admin). */
+function saveMasterPc(input) {
+  var me = requireAdmin_();
+  var code = String(input.pc_code || '').trim();
+  if (!code) throw new Error('ไม่มีรหัส PC');
+  var owners = splitEmails_(input.owner_emails);
+  var manager = String(input.manager_email || '').trim().toLowerCase();
+  if (manager && !/@/.test(manager)) throw new Error('อีเมลหัวหน้าไม่ถูกต้อง');
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    var ss = db_();
+    var h = ensureHeader_(ss, CONFIG.SHEETS.MASTER_PC, MASTER_PC_HEADER);
+    var values = h.sheet.getDataRange().getValues();
+    var col = {};
+    h.header.forEach(function (k, i) { col[k] = i; });
+    var obj = { pc_code: code, pc_name: String(input.pc_name || ''), owner_emails: owners.join(', '),
+      manager_email: manager, default_budget_key: String(input.default_budget_key || ''), note: String(input.note || '') };
+    for (var r = 1; r < values.length; r++) {
+      if (String(values[r][col.pc_code]) === code) {
+        MASTER_PC_HEADER.forEach(function (k) { h.sheet.getRange(r + 1, col[k] + 1).setValue(obj[k]); });
+        logActivity_('saveMasterPc', 'ok', me.email + ' ' + code);
+        return listMasterPc();
+      }
+    }
+    appendObject_(ss, CONFIG.SHEETS.MASTER_PC, MASTER_PC_HEADER, obj);
+  } finally {
+    lock.releaseLock();
+  }
+  logActivity_('saveMasterPc', 'ok', me.email + ' ' + code);
+  return listMasterPc();
+}
+
 // ============================================================ Members.js
 /**
  * Members.js
@@ -590,6 +662,37 @@ function ensureSheet_(ss, name, header) {
     sheet.setFrozenRows(1);
   }
   return sheet;
+}
+
+/**
+ * Like ensureSheet_, but also appends any header columns that an older
+ * version of the sheet is missing, so new fields never shift existing data.
+ * Returns { sheet, header } where header is the sheet's actual column order.
+ */
+function ensureHeader_(ss, name, header) {
+  var sheet = ensureSheet_(ss, name, header);
+  var lastCol = Math.max(1, sheet.getLastColumn ? sheet.getLastColumn() : header.length);
+  var current = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(String).filter(String);
+  var missing = header.filter(function (h) { return current.indexOf(h) === -1; });
+  if (missing.length) {
+    sheet.getRange(1, current.length + 1, 1, missing.length).setValues([missing]).setFontWeight('bold');
+    current = current.concat(missing);
+  }
+  return { sheet: sheet, header: current };
+}
+
+/** Appends one object as a row, placing each field in its named column. */
+function appendObject_(ss, name, header, obj) {
+  var h = ensureHeader_(ss, name, header);
+  h.sheet.appendRow(h.header.map(function (k) { return obj[k] == null ? '' : obj[k]; }));
+}
+
+/** Appends many objects in one write. */
+function appendObjects_(ss, name, header, objs) {
+  if (!objs.length) return;
+  var h = ensureHeader_(ss, name, header);
+  var rows = objs.map(function (o) { return h.header.map(function (k) { return o[k] == null ? '' : o[k]; }); });
+  h.sheet.getRange(h.sheet.getLastRow() + 1, 1, rows.length, h.header.length).setValues(rows);
 }
 
 function activeEmail_() {
@@ -1041,35 +1144,53 @@ function buildSkuToPcIndex_(ss) {
 // ============================================================ Requests.js
 /**
  * Requests.js
- * User -> Admin purchase requests. A user picks items + quantities in the
- * web UI, chooses which budget line (Company x Media Location x GL Code) and
- * which month the goods will be used, and submits. Admins are emailed and
- * approve/reject in the "คำขอ" tab. Approved requests are written to
- * pr_po_log so Budget.js sees them as committed spend.
+ * Purchase requests following store-ai-workflow.html:
  *
- * Budget comes from the "Budget STT 2026 - Revise-Budget" export, uploaded by
- * an admin in the Admin tab (parsed in the browser, aggregated per line/month,
- * stored in budget_master).
- *   plan      = Revise Budget when filled, else Budget (per source row, summed)
- *   reserved  = totals of requests still pending or approved for that line/month
+ *  (4) Admin picks the items to order ─► (5) createRound(): one request per PC,
+ *      AI-drafted email to the PC owners from master_pc              [รอ PC ยืนยัน]
+ *  (6) PC owner confirms / edits qty / rejects, and picks the budget
+ *      line + month the goods will be used          ─► [รออนุมัติ] / [PC ปฏิเสธ]
+ *      no answer in CONFIG.REMINDER_AFTER_DAYS ─► reminder email (daily trigger)
+ *  (7) Admin reviews (AI summary in the email); budget check:
+ *        enough      ─► approve                                         [อนุมัติ]
+ *        not enough  ─► (8b) requestOverBudget(): email the PC manager
+ *                        [รอหัวหน้าอนุมัติเกินงบ] ─► manager approves ─► [รออนุมัติ]
+ *  (9) issuePo(): PR/PO number, commits spend to pr_po_log         [ออก PR/PO แล้ว]
+ * (10) markReceived()                                                 [รับของแล้ว]
+ *
+ * Users can also start a request themselves from their cart (submitOrderRequest),
+ * which enters at step 6's output ([รออนุมัติ]).
+ *
+ * Budget: an admin uploads the "Budget STT 2026 - Revise-Budget" export (Admin tab),
+ * aggregated per Company x Media Location x GL Code x month in budget_master.
+ *   plan      = Revise Budget when filled, else Budget
+ *   reserved  = totals of requests from [รออนุมัติ] onward that are not rejected/cancelled
  *   available = plan - actual - reserved
  */
 
 var BUDGET_HEADER = ['key', 'company', 'division', 'media_type', 'media_group', 'media_location',
   'expense_group', 'gl_code', 'gl_name', 'year', 'month_number', 'budget', 'revise_budget', 'actual', 'plan'];
-var REQUEST_HEADER = ['request_id', 'created_at', 'requester_email', 'requester_name', 'budget_key',
-  'budget_label', 'budget_year', 'budget_month', 'total', 'item_count', 'available_at_submit', 'over_budget',
-  'status', 'note', 'decided_by', 'decided_at', 'admin_note'];
-var REQUEST_ITEM_HEADER = ['request_id', 'sku', 'name', 'pc_code', 'pc_name', 'unit', 'qty', 'unit_cost',
-  'amount', 'note'];
-var PR_LOG_HEADER = ['created_at', 'request_id', 'pc_code', 'budget_key', 'budget_year', 'month_number', 'amount', 'approved_by'];
+var REQUEST_HEADER = ['request_id', 'created_at', 'source', 'round_id', 'pc_code', 'pc_name', 'assigned_to',
+  'requester_email', 'requester_name', 'budget_key', 'budget_label', 'budget_year', 'budget_month', 'total',
+  'item_count', 'available_at_submit', 'over_budget', 'status', 'note', 'sent_at', 'reminded_at',
+  'confirmed_by', 'confirmed_at', 'manager_email', 'manager_decision', 'manager_note', 'manager_at',
+  'decided_by', 'decided_at', 'admin_note', 'po_no', 'po_at', 'received_at'];
+var REQUEST_ITEM_HEADER = ['request_id', 'sku', 'name', 'pc_code', 'pc_name', 'unit', 'suggested_qty', 'qty',
+  'unit_cost', 'amount', 'note'];
+var PR_LOG_HEADER = ['created_at', 'request_id', 'po_no', 'pc_code', 'budget_key', 'budget_year', 'month_number', 'amount', 'issued_by'];
 
-var STATUS = { PENDING: 'รออนุมัติ', APPROVED: 'อนุมัติ', REJECTED: 'ไม่อนุมัติ', CANCELLED: 'ยกเลิก' };
+var STATUS = {
+  WAIT_PC: 'รอ PC ยืนยัน', PC_REJECTED: 'PC ปฏิเสธ',
+  PENDING: 'รออนุมัติ', OVER_WAIT: 'รอหัวหน้าอนุมัติเกินงบ',
+  APPROVED: 'อนุมัติ', REJECTED: 'ไม่อนุมัติ', CANCELLED: 'ยกเลิก',
+  PO: 'ออก PR/PO แล้ว', RECEIVED: 'รับของแล้ว'
+};
+var RESERVING = [STATUS.PENDING, STATUS.OVER_WAIT, STATUS.APPROVED, STATUS.PO, STATUS.RECEIVED];
 var THAI_MONTH_NAMES = ['', 'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
 
-// ------------------------------------------------------------ budget
+// ============================================================ budget
 
-/** Admin uploads budget rows already aggregated by the page (see web/app.js parseBudgetWorkbook). */
+/** Admin uploads budget rows already aggregated by the page (web/parsers.js parseBudget). */
 function importBudget(rows) {
   var me = requireAdmin_();
   if (!rows || !rows.length) throw new Error('ไม่พบข้อมูล Budget ในไฟล์');
@@ -1080,8 +1201,7 @@ function importBudget(rows) {
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
-    var ss = db_();
-    var sheet = ensureSheet_(ss, CONFIG.SHEETS.BUDGET, BUDGET_HEADER);
+    var sheet = ensureSheet_(db_(), CONFIG.SHEETS.BUDGET, BUDGET_HEADER);
     sheet.clearContents();
     sheet.getRange(1, 1, 1, BUDGET_HEADER.length).setValues([BUDGET_HEADER]).setFontWeight('bold');
     sheet.getRange(2, 1, values.length, BUDGET_HEADER.length).setValues(values);
@@ -1099,11 +1219,13 @@ function budgetLabel_(b) {
 /** Budget lines with per-month plan/actual, plus amounts reserved by open requests. */
 function getBudgetOptions() {
   requireActive_();
-  var ss = db_();
-  var rows = readSheetAsObjects_(ss, CONFIG.SHEETS.BUDGET);
+  return budgetOptions_(db_());
+}
+
+function budgetOptions_(ss) {
   var lines = {};
   var year = 0;
-  rows.forEach(function (b) {
+  readSheetAsObjects_(ss, CONFIG.SHEETS.BUDGET).forEach(function (b) {
     if (!b.key) return;
     var l = lines[b.key];
     if (!l) {
@@ -1127,23 +1249,74 @@ function getBudgetOptions() {
   };
 }
 
-/** { "key|month": amount } for requests that are pending or approved. */
-function reservedByBudget_(ss) {
+/** { "key|month": amount } for requests that hold budget. excludeId skips one request. */
+function reservedByBudget_(ss, excludeId) {
   var out = {};
   readSheetAsObjects_(ss, CONFIG.SHEETS.REQUESTS).forEach(function (r) {
-    if (r.status !== STATUS.PENDING && r.status !== STATUS.APPROVED) return;
+    if (RESERVING.indexOf(r.status) === -1 || !r.budget_key || r.request_id === excludeId) return;
     var k = r.budget_key + '|' + Number(r.budget_month);
     out[k] = (out[k] || 0) + (Number(r.total) || 0);
   });
   return out;
 }
 
-// ------------------------------------------------------------ user: submit / list / cancel
+function availableFor_(opts, key, month) {
+  var line = opts.lines.filter(function (l) { return l.key === key; })[0];
+  if (!line) return null;
+  var mb = line.months[month] || { plan: 0, actual: 0 };
+  return { line: line, available: mb.plan - mb.actual - (opts.reserved[key + '|' + month] || 0) };
+}
+
+// ============================================================ (5) admin creates a round per PC
 
 /**
- * payload: { budgetKey, month, note, items: [{ sku, name, pc, pcName, unit, qty, unitCost, note }] }
- * Over-budget requests are accepted but flagged so the admin decides.
+ * items: [{ sku, name, pc, pcName, unit, qty, unitCost }] — usually the admin's cart.
+ * Creates one request per PC in [รอ PC ยืนยัน] and emails that PC's owners.
  */
+function createRound(items, note) {
+  var me = requireAdmin_();
+  items = (items || []).filter(function (i) { return Number(i.qty) > 0 && i.pc; });
+  if (!items.length) throw new Error('ไม่มีรายการ (ต้องมีจำนวน > 0 และรู้ PC)');
+  var ss = db_();
+  var master = readMasterPc_(ss);
+  var byPc = {};
+  items.forEach(function (i) { (byPc[i.pc] = byPc[i.pc] || []).push(i); });
+
+  var roundId = 'RND-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyMMdd-HHmm');
+  var created = [], noOwner = [];
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    Object.keys(byPc).sort().forEach(function (pc) {
+      var list = byPc[pc];
+      var m = master[pc] || { owner_emails: [], manager_email: '', pc_name: list[0].pcName || '' };
+      var id = nextRequestId_(ss);
+      var rows = itemRows_(id, list, true);
+      appendObject_(ss, CONFIG.SHEETS.REQUESTS, REQUEST_HEADER, {
+        request_id: id, created_at: new Date(), source: 'round', round_id: roundId,
+        pc_code: pc, pc_name: m.pc_name || list[0].pcName || '', assigned_to: m.owner_emails.join(', '),
+        requester_email: me.email, requester_name: me.name, total: sumAmount_(rows), item_count: rows.length,
+        status: STATUS.WAIT_PC, note: String(note || '').slice(0, 500),
+        sent_at: m.owner_emails.length ? new Date() : '', manager_email: m.manager_email
+      });
+      appendObjects_(ss, CONFIG.SHEETS.REQUEST_ITEMS, REQUEST_ITEM_HEADER, rows);
+      created.push({ id: id, pc: pc, owners: m.owner_emails, items: rows });
+      if (!m.owner_emails.length) noOwner.push(pc);
+    });
+  } finally {
+    lock.releaseLock();
+  }
+
+  created.forEach(function (c) {
+    if (c.owners.length) sendPcConfirmEmail_(c.id, c.pc, (master[c.pc] || {}).pc_name || '', c.owners, c.items, note, false);
+  });
+  logActivity_('createRound', 'ok', roundId + ' by ' + me.email + ': ' + created.length + ' PC, no owner: ' + noOwner.join(','));
+  return { roundId: roundId, created: created.map(function (c) { return { id: c.id, pc: c.pc, sentTo: c.owners.join(', ') }; }), noOwner: noOwner };
+}
+
+// ============================================================ user: submit from cart (enters as รออนุมัติ)
+
+/** payload: { budgetKey, month, note, items: [{ sku, name, pc, pcName, unit, qty, unitCost, note }] } */
 function submitOrderRequest(payload) {
   var me = requireActive_();
   var items = (payload && payload.items || []).filter(function (i) { return Number(i.qty) > 0; });
@@ -1152,118 +1325,285 @@ function submitOrderRequest(payload) {
   var month = Number(payload.month);
   if (!(month >= 1 && month <= 12)) throw new Error('กรุณาเลือกเดือนที่จะใช้ของ');
 
-  var opts = getBudgetOptions();
-  var line = opts.lines.filter(function (l) { return l.key === payload.budgetKey; })[0];
-  if (!line) throw new Error('กรุณาเลือก Budget');
+  var ss = db_();
+  var opts = budgetOptions_(ss);
+  var av = availableFor_(opts, payload.budgetKey, month);
+  if (!av) throw new Error('กรุณาเลือก Budget');
 
-  var total = 0;
-  var itemRows = items.map(function (i) {
-    var qty = Math.round(Number(i.qty));
-    var cost = Math.max(0, Number(i.unitCost) || 0);
-    var amount = Math.round(qty * cost * 100) / 100;
-    total += amount;
-    return [null, String(i.sku), String(i.name || '').slice(0, 200), String(i.pc || ''), String(i.pcName || ''),
-      String(i.unit || ''), qty, cost, amount, String(i.note || '').slice(0, 300)];
-  });
-  total = Math.round(total * 100) / 100;
-
-  var mb = line.months[month] || { plan: 0, actual: 0 };
-  var available = mb.plan - mb.actual - (opts.reserved[line.key + '|' + month] || 0);
-  var over = total > available;
-
+  var id, total, rows;
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
-  var id;
   try {
-    var ss = db_();
-    var reqSheet = ensureSheet_(ss, CONFIG.SHEETS.REQUESTS, REQUEST_HEADER);
-    var itemSheet = ensureSheet_(ss, CONFIG.SHEETS.REQUEST_ITEMS, REQUEST_ITEM_HEADER);
-    id = 'REQ-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyMMdd') + '-' +
-      ('000' + reqSheet.getLastRow()).slice(-4);
-    reqSheet.appendRow([id, new Date(), me.email, me.name, line.key, line.label, opts.year, month, total,
-      itemRows.length, Math.round(available * 100) / 100, over ? 'เกินงบ' : '', STATUS.PENDING,
-      String(payload.note || '').slice(0, 500), '', '', '']);
-    itemRows.forEach(function (r) { r[0] = id; });
-    itemSheet.getRange(itemSheet.getLastRow() + 1, 1, itemRows.length, REQUEST_ITEM_HEADER.length).setValues(itemRows);
+    id = nextRequestId_(ss);
+    rows = itemRows_(id, items, false);
+    total = sumAmount_(rows);
+    var pcs = uniq_(items.map(function (i) { return i.pc; }));
+    var master = readMasterPc_(ss);
+    appendObject_(ss, CONFIG.SHEETS.REQUESTS, REQUEST_HEADER, {
+      request_id: id, created_at: new Date(), source: 'user', pc_code: pcs.join(', '),
+      requester_email: me.email, requester_name: me.name, budget_key: av.line.key, budget_label: av.line.label,
+      budget_year: opts.year, budget_month: month, total: total, item_count: rows.length,
+      available_at_submit: round2_(av.available), over_budget: total > av.available ? 'เกินงบ' : '',
+      status: STATUS.PENDING, note: String(payload.note || '').slice(0, 500),
+      confirmed_by: me.email, confirmed_at: new Date(),
+      manager_email: pcs.length === 1 && master[pcs[0]] ? master[pcs[0]].manager_email : ''
+    });
+    appendObjects_(ss, CONFIG.SHEETS.REQUEST_ITEMS, REQUEST_ITEM_HEADER, rows);
   } finally {
     lock.releaseLock();
   }
-
-  notifyAdminsNewRequest_(id, me, line, month, total, available, items);
+  notifyAdminsForReview_(id);
   logActivity_('submitOrderRequest', 'ok', id + ' by ' + me.email + ' total ' + total);
-  return { id: id, total: total, available: available, overBudget: over };
+  return { id: id, total: total, available: av.available, overBudget: total > av.available };
 }
 
-function listMyRequests() {
+// ============================================================ (6) PC owner confirms / rejects
+
+/** payload: { items: [{ sku, qty, note }], budgetKey, month, note } — qty 0 drops the line. */
+function confirmRequest(id, payload) {
   var me = requireActive_();
-  return loadRequests_(function (r) { return r.requester_email === me.email; });
+  var ss = db_();
+  var req = findRequest_(ss, id);
+  if (req.status !== STATUS.WAIT_PC) throw new Error('คำขอนี้ไม่ได้รอการยืนยันแล้ว (' + req.status + ')');
+  if (!canActAsPc_(me, req)) throw new Error('คุณไม่ได้เป็นผู้รับผิดชอบ ' + req.pc_code);
+  var month = Number(payload.month);
+  if (!(month >= 1 && month <= 12)) throw new Error('กรุณาเลือกเดือนที่จะใช้ของ');
+  var opts = budgetOptions_(ss);
+  var av = availableFor_(opts, payload.budgetKey, month);
+  if (!av) throw new Error('กรุณาเลือก Budget');
+
+  var edits = {};
+  (payload.items || []).forEach(function (i) { edits[i.sku] = i; });
+  var remaining = readItems_(ss, id).filter(function (i) {
+    return (edits[i.sku] ? Math.round(Number(edits[i.sku].qty) || 0) : i.qty) > 0;
+  });
+  if (!remaining.length) throw new Error('ทุกรายการเป็น 0 — ถ้าไม่ต้องการสั่ง ให้กด "ไม่สั่งรอบนี้"');
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  var total;
+  try {
+    total = updateItems_(ss, id, function (item) {
+      var e = edits[item.sku];
+      if (!e) return item;
+      item.qty = Math.max(0, Math.round(Number(e.qty) || 0));
+      item.amount = round2_(item.qty * (Number(item.unit_cost) || 0));
+      if (e.note != null) item.note = String(e.note).slice(0, 300);
+      return item;
+    });
+    setRequestFields_(ss, id, {
+      budget_key: av.line.key, budget_label: av.line.label, budget_year: opts.year, budget_month: month,
+      total: total.amount, item_count: total.count, available_at_submit: round2_(av.available),
+      over_budget: total.amount > av.available ? 'เกินงบ' : '', status: STATUS.PENDING,
+      note: String(payload.note || req.note || '').slice(0, 500), confirmed_by: me.email, confirmed_at: new Date()
+    });
+  } finally {
+    lock.releaseLock();
+  }
+  notifyAdminsForReview_(id);
+  logActivity_('confirmRequest', 'ok', id + ' by ' + me.email + ' total ' + total.amount);
+  return loadRequestsFor_(me);
+}
+
+function rejectByPc(id, note) {
+  var me = requireActive_();
+  var ss = db_();
+  var req = findRequest_(ss, id);
+  if (req.status !== STATUS.WAIT_PC) throw new Error('คำขอนี้ไม่ได้รอการยืนยันแล้ว');
+  if (!canActAsPc_(me, req)) throw new Error('คุณไม่ได้เป็นผู้รับผิดชอบ ' + req.pc_code);
+  setRequestFields_(ss, id, { status: STATUS.PC_REJECTED, confirmed_by: me.email, confirmed_at: new Date(),
+    note: String(note || '').slice(0, 500) });
+  mailAdmins_('[Store Reorder] ' + id + ' ' + req.pc_code + ' ไม่สั่งรอบนี้',
+    esc_(me.name || me.email) + ' แจ้งว่า ' + esc_(req.pc_code) + ' ไม่สั่งรอบนี้' + (note ? '<br>เหตุผล: ' + esc_(note) : '') + appLink_(id));
+  logActivity_('rejectByPc', 'ok', id + ' by ' + me.email);
+  return loadRequestsFor_(me);
 }
 
 function cancelMyRequest(id) {
   var me = requireActive_();
-  return updateRequestStatus_(id, function (r) {
-    if (r.requester_email !== me.email) throw new Error('ยกเลิกได้เฉพาะคำขอของตัวเอง');
-    if (r.status !== STATUS.PENDING) throw new Error('ยกเลิกได้เฉพาะคำขอที่รออนุมัติ');
-    return { status: STATUS.CANCELLED, decided_by: me.email, admin_note: 'ผู้ขอยกเลิกเอง' };
-  });
+  var ss = db_();
+  var req = findRequest_(ss, id);
+  if (req.requester_email !== me.email && me.role !== 'admin') throw new Error('ยกเลิกได้เฉพาะคำขอของตัวเอง');
+  if ([STATUS.PENDING, STATUS.WAIT_PC, STATUS.OVER_WAIT].indexOf(req.status) === -1) throw new Error('ยกเลิกไม่ได้ในสถานะ ' + req.status);
+  setRequestFields_(ss, id, { status: STATUS.CANCELLED, decided_by: me.email, decided_at: new Date(), admin_note: 'ยกเลิกโดย ' + me.email });
+  logActivity_('cancelRequest', 'ok', id + ' by ' + me.email);
+  return loadRequestsFor_(me);
 }
 
-// ------------------------------------------------------------ admin
+// ============================================================ (7)(8) admin review + budget check
 
-function listAllRequests(status) {
-  requireAdmin_();
-  return loadRequests_(function (r) { return !status || r.status === status; });
-}
-
-/** decision: 'approve' | 'reject' */
+/** decision: 'approve' | 'reject'. Over-budget needs the manager's approval first (8b). */
 function decideRequest(id, decision, note) {
   var me = requireAdmin_();
+  var ss = db_();
+  var req = findRequest_(ss, id);
+  if (req.status !== STATUS.PENDING) throw new Error('คำขอนี้ไม่ได้อยู่ในสถานะรออนุมัติ (' + req.status + ')');
   var approve = decision === 'approve';
-  var result = updateRequestStatus_(id, function (r) {
-    if (r.status !== STATUS.PENDING) throw new Error('คำขอนี้ถูกดำเนินการไปแล้ว (' + r.status + ')');
-    return { status: approve ? STATUS.APPROVED : STATUS.REJECTED, decided_by: me.email,
-      admin_note: String(note || '').slice(0, 500) };
-  });
-  var req = result.request;
-
   if (approve) {
-    // Committed spend per PC for Budget.js (checkBudget_) — one row per PC in the request
-    var byPc = {};
-    req.items.forEach(function (i) { byPc[i.pc_code] = (byPc[i.pc_code] || 0) + Number(i.amount); });
-    var log = ensureSheet_(db_(), CONFIG.SHEETS.PR_LOG, PR_LOG_HEADER);
-    Object.keys(byPc).forEach(function (pc) {
-      log.appendRow([new Date(), req.request_id, pc, req.budget_key, req.budget_year, req.budget_month,
-        Math.round(byPc[pc] * 100) / 100, me.email]);
-    });
+    var av = availableFor_({ lines: budgetOptions_(ss).lines, reserved: reservedByBudget_(ss, id) }, req.budget_key, Number(req.budget_month));
+    var over = !av || Number(req.total) > av.available;
+    if (over && req.manager_decision !== 'อนุมัติ') {
+      throw new Error('งบไม่พอ (คงเหลือ ' + fmtMoney_(av ? av.available : 0) + ' บาท) — กด "ขออนุมัติเกินงบ" ให้หัวหน้า PC อนุมัติก่อน');
+    }
   }
-
-  MailApp.sendEmail({
-    to: req.requester_email,
-    subject: '[Store Reorder] ' + req.request_id + ' ' + req.status,
-    htmlBody: 'คำขอ ' + esc_(req.request_id) + ' (' + fmtMoney_(req.total) + ' บาท) : <b>' + esc_(req.status) + '</b>' +
-      (req.admin_note ? '<br>หมายเหตุจาก Admin: ' + esc_(req.admin_note) : '') +
-      '<br><a href="' + webAppUrl_() + '">เปิดระบบ</a>'
-  });
-  logActivity_('decideRequest', 'ok', id + ' ' + req.status + ' by ' + me.email);
-  return listAllRequests();
+  setRequestFields_(ss, id, { status: approve ? STATUS.APPROVED : STATUS.REJECTED, decided_by: me.email,
+    decided_at: new Date(), admin_note: String(note || '').slice(0, 500) });
+  mailPeople_(requestPeople_(req), '[Store Reorder] ' + id + ' ' + (approve ? STATUS.APPROVED : STATUS.REJECTED),
+    'คำขอ ' + esc_(id) + ' (' + fmtMoney_(req.total) + ' บาท): <b>' + (approve ? STATUS.APPROVED : STATUS.REJECTED) + '</b>' +
+    (note ? '<br>หมายเหตุจาก Admin: ' + esc_(note) : '') + appLink_(id));
+  logActivity_('decideRequest', 'ok', id + ' ' + decision + ' by ' + me.email);
+  return loadRequestsFor_(me);
 }
 
-// ------------------------------------------------------------ helpers
+/** (8b) AI-drafted over-budget approval request to the PC manager. */
+function requestOverBudget(id, managerEmail, reason) {
+  var me = requireAdmin_();
+  var ss = db_();
+  var req = findRequest_(ss, id);
+  if (req.status !== STATUS.PENDING) throw new Error('ขออนุมัติเกินงบได้เฉพาะคำขอที่รออนุมัติ');
+  var manager = String(managerEmail || req.manager_email || '').trim().toLowerCase();
+  if (!/@/.test(manager)) throw new Error('ยังไม่มีอีเมลหัวหน้า PC — ใส่ใน Master PC หรือกรอกตอนกดขออนุมัติ');
+  var av = availableFor_({ lines: budgetOptions_(ss).lines, reserved: reservedByBudget_(ss, id) }, req.budget_key, Number(req.budget_month));
+  var shortfall = round2_(Number(req.total) - (av ? av.available : 0));
+  setRequestFields_(ss, id, { status: STATUS.OVER_WAIT, manager_email: manager, manager_decision: '', admin_note: String(reason || '').slice(0, 500) });
+
+  var items = readItems_(ss, id);
+  var fallback = 'เรียน หัวหน้า ' + esc_(req.pc_code) + '<br><br>คำขอสั่งซื้อ ' + esc_(id) + ' ยอด ' + fmtMoney_(req.total) +
+    ' บาท เกินงบ ' + esc_(req.budget_label) + ' เดือน ' + THAI_MONTH_NAMES[Number(req.budget_month)] + ' อยู่ ' + fmtMoney_(shortfall) +
+    ' บาท' + (reason ? '<br>เหตุผล: ' + esc_(reason) : '') + '<br>กรุณาพิจารณาอนุมัติ';
+  var body = aiDraft_(function () {
+    return draftBudgetExceptionRequest_(req.pc_code + ' ' + req.pc_name, items.map(function (i) { return { name: i.name, confirmed_qty: i.qty }; }), shortfall)
+      .replace(/\n/g, '<br>');
+  }, fallback);
+  mailPeople_([manager], '[Store Reorder] ขออนุมัติเกินงบ ' + id + ' (' + fmtMoney_(shortfall) + ' บาท)',
+    body + itemsTable_(items) + appLink_(id, 'เปิดระบบเพื่ออนุมัติ/ไม่อนุมัติ'));
+  logActivity_('requestOverBudget', 'ok', id + ' -> ' + manager + ' shortfall ' + shortfall);
+  return loadRequestsFor_(me);
+}
+
+/** Manager (or admin on their behalf) answers the over-budget request. */
+function managerDecision(id, approve, note) {
+  var me = requireActive_();
+  var ss = db_();
+  var req = findRequest_(ss, id);
+  if (req.status !== STATUS.OVER_WAIT) throw new Error('คำขอนี้ไม่ได้รออนุมัติเกินงบ');
+  if (me.email !== String(req.manager_email).toLowerCase() && me.role !== 'admin') throw new Error('เฉพาะหัวหน้าที่ได้รับคำขอเท่านั้น');
+  setRequestFields_(ss, id, {
+    status: approve ? STATUS.PENDING : STATUS.REJECTED, manager_decision: approve ? 'อนุมัติ' : 'ไม่อนุมัติ',
+    manager_note: String(note || '').slice(0, 500), manager_at: new Date()
+  });
+  mailAdmins_('[Store Reorder] หัวหน้า' + (approve ? 'อนุมัติ' : 'ไม่อนุมัติ') + 'เกินงบ ' + id,
+    esc_(me.name || me.email) + ' ' + (approve ? 'อนุมัติ' : 'ไม่อนุมัติ') + 'เกินงบคำขอ ' + esc_(id) +
+    (note ? '<br>หมายเหตุ: ' + esc_(note) : '') + (approve ? '<br>ออก PR/PO ต่อได้' : '') + appLink_(id));
+  logActivity_('managerDecision', 'ok', id + ' ' + (approve ? 'approve' : 'reject') + ' by ' + me.email);
+  return loadRequestsFor_(me);
+}
+
+// ============================================================ (9)(10) PR/PO + receive
+
+function issuePo(id, poNo) {
+  var me = requireAdmin_();
+  var ss = db_();
+  var req = findRequest_(ss, id);
+  if (req.status !== STATUS.APPROVED) throw new Error('ออก PR/PO ได้เฉพาะคำขอที่อนุมัติแล้ว');
+  poNo = String(poNo || '').trim().slice(0, 60);
+  if (!poNo) throw new Error('กรุณาใส่เลข PR/PO');
+  setRequestFields_(ss, id, { status: STATUS.PO, po_no: poNo, po_at: new Date() });
+  // Commit spend per PC (Budget.js / checkBudget_ reads pr_po_log)
+  var byPc = {};
+  readItems_(ss, id).forEach(function (i) { byPc[i.pc_code] = (byPc[i.pc_code] || 0) + Number(i.amount); });
+  appendObjects_(ss, CONFIG.SHEETS.PR_LOG, PR_LOG_HEADER, Object.keys(byPc).map(function (pc) {
+    return { created_at: new Date(), request_id: id, po_no: poNo, pc_code: pc, budget_key: req.budget_key,
+      budget_year: req.budget_year, month_number: req.budget_month, amount: round2_(byPc[pc]), issued_by: me.email };
+  }));
+  mailPeople_(requestPeople_(req), '[Store Reorder] ' + id + ' ออก PR/PO แล้ว: ' + poNo,
+    'คำขอ ' + esc_(id) + ' ออก PR/PO เลขที่ <b>' + esc_(poNo) + '</b> แล้ว' + appLink_(id));
+  logActivity_('issuePo', 'ok', id + ' ' + poNo + ' by ' + me.email);
+  return loadRequestsFor_(me);
+}
+
+function markReceived(id, note) {
+  var me = requireAdmin_();
+  var ss = db_();
+  var req = findRequest_(ss, id);
+  if (req.status !== STATUS.PO) throw new Error('บันทึกรับของได้เฉพาะคำขอที่ออก PR/PO แล้ว');
+  setRequestFields_(ss, id, { status: STATUS.RECEIVED, received_at: new Date(),
+    admin_note: [req.admin_note, note].filter(String).join(' | ').slice(0, 500) });
+  mailPeople_(requestPeople_(req), '[Store Reorder] ' + id + ' ของเข้าแล้ว',
+    'สินค้าตามคำขอ ' + esc_(id) + ' (PR/PO ' + esc_(req.po_no) + ') รับเข้า Store แล้ว' + appLink_(id));
+  logActivity_('markReceived', 'ok', id + ' by ' + me.email);
+  return loadRequestsFor_(me);
+}
+
+// ============================================================ reminders (daily trigger)
+
+/** Re-sends the confirm email for requests still waiting on the PC after REMINDER_AFTER_DAYS. */
+function remindPendingConfirmations() {
+  var ss = db_();
+  var days = CONFIG.REMINDER_AFTER_DAYS || 3;
+  var cutoff = Date.now() - days * 86400000;
+  var master = readMasterPc_(ss);
+  var n = 0;
+  readSheetAsObjects_(ss, CONFIG.SHEETS.REQUESTS).forEach(function (r) {
+    if (r.status !== STATUS.WAIT_PC || !r.sent_at) return;
+    var last = r.reminded_at instanceof Date ? r.reminded_at : r.sent_at;
+    if (!(last instanceof Date) || last.getTime() > cutoff) return;
+    var owners = splitEmails_(r.assigned_to);
+    if (!owners.length) return;
+    sendPcConfirmEmail_(r.request_id, r.pc_code, (master[r.pc_code] || {}).pc_name || r.pc_name, owners, readItems_(ss, r.request_id), r.note, true);
+    setRequestFields_(ss, r.request_id, { reminded_at: new Date() });
+    n++;
+  });
+  logActivity_('remindPendingConfirmations', 'ok', n + ' reminders');
+  return n;
+}
+
+/** Admin tab button: daily reminder trigger at 09:00 (replaces older copies). */
+function installReminderTrigger() {
+  requireAdmin_();
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'remindPendingConfirmations') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('remindPendingConfirmations').timeBased().everyDays(1).atHour(9).create();
+  return 'ตั้งเตือนอัตโนมัติทุกวัน 09:00 แล้ว (เตือนเมื่อ PC ไม่ตอบเกิน ' + (CONFIG.REMINDER_AFTER_DAYS || 3) + ' วัน)';
+}
+
+// ============================================================ listing
+
+function listMyRequests() {
+  return loadRequestsFor_(requireActive_());
+}
+
+function listAllRequests() {
+  requireAdmin_();
+  return loadRequests_(function () { return true; });
+}
+
+/** Admins see everything; others see what they requested, are assigned, or must approve. */
+function loadRequestsFor_(me) {
+  if (me.role === 'admin') return loadRequests_(function () { return true; });
+  return loadRequests_(function (r) {
+    return r.requester_email === me.email || splitEmails_(r.assigned_to).indexOf(me.email) !== -1 ||
+      String(r.manager_email).toLowerCase() === me.email;
+  });
+}
 
 function loadRequests_(filterFn) {
   var ss = db_();
   var items = {};
   readSheetAsObjects_(ss, CONFIG.SHEETS.REQUEST_ITEMS).forEach(function (i) {
-    (items[i.request_id] = items[i.request_id] || []).push({
-      sku: i.sku, name: i.name, pc_code: i.pc_code, pc_name: i.pc_name, unit: i.unit,
-      qty: Number(i.qty), unit_cost: Number(i.unit_cost), amount: Number(i.amount), note: i.note
-    });
+    (items[i.request_id] = items[i.request_id] || []).push(toClientItem_(i));
   });
   return readSheetAsObjects_(ss, CONFIG.SHEETS.REQUESTS)
     .filter(function (r) { return r.request_id && filterFn(r); })
     .map(function (r) { return toClientRequest_(r, items[r.request_id] || []); })
     .reverse()
-    .slice(0, 300);
+    .slice(0, 400);
+}
+
+function toClientItem_(i) {
+  return { sku: String(i.sku), name: String(i.name), pc_code: String(i.pc_code), pc_name: String(i.pc_name || ''),
+    unit: String(i.unit), suggested_qty: Number(i.suggested_qty) || 0, qty: Number(i.qty), unit_cost: Number(i.unit_cost),
+    amount: Number(i.amount), note: String(i.note || '') };
 }
 
 /** google.script.run can't return Date objects — convert to strings. */
@@ -1271,61 +1611,163 @@ function toClientRequest_(r, items) {
   var out = {};
   REQUEST_HEADER.forEach(function (h) {
     var v = r[h];
-    out[h] = v instanceof Date ? Utilities.formatDate(v, 'Asia/Bangkok', 'yyyy-MM-dd HH:mm') : v;
+    out[h] = v instanceof Date ? Utilities.formatDate(v, 'Asia/Bangkok', 'yyyy-MM-dd HH:mm') : (v == null ? '' : v);
   });
-  out.month_label = THAI_MONTH_NAMES[Number(r.budget_month)] + ' ' + (Number(r.budget_year) ? Number(r.budget_year) : '');
+  out.assigned = splitEmails_(r.assigned_to);
+  out.month_label = r.budget_month ? THAI_MONTH_NAMES[Number(r.budget_month)] + ' ' + (Number(r.budget_year) || '') : '';
   out.items = items;
   return out;
 }
 
-function updateRequestStatus_(id, mutate) {
-  var lock = LockService.getScriptLock();
-  lock.waitLock(30000);
+// ============================================================ sheet helpers
+
+function nextRequestId_(ss) {
+  var sheet = ensureHeader_(ss, CONFIG.SHEETS.REQUESTS, REQUEST_HEADER).sheet;
+  return 'REQ-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyMMdd') + '-' + ('000' + sheet.getLastRow()).slice(-4);
+}
+
+function itemRows_(id, items, fromRound) {
+  return items.map(function (i) {
+    var qty = Math.max(0, Math.round(Number(i.qty) || 0));
+    var cost = Math.max(0, Number(i.unitCost) || 0);
+    return { request_id: id, sku: String(i.sku), name: String(i.name || '').slice(0, 200), pc_code: String(i.pc || ''),
+      pc_name: String(i.pcName || ''), unit: String(i.unit || ''), suggested_qty: fromRound ? qty : '',
+      qty: qty, unit_cost: cost, amount: round2_(qty * cost), note: String(i.note || '').slice(0, 300) };
+  });
+}
+
+function sumAmount_(rows) {
+  return round2_(rows.reduce(function (a, r) { return a + (Number(r.amount) || 0); }, 0));
+}
+
+function findRequest_(ss, id) {
+  var r = readSheetAsObjects_(ss, CONFIG.SHEETS.REQUESTS).filter(function (x) { return x.request_id === id; })[0];
+  if (!r) throw new Error('ไม่พบคำขอ ' + id);
+  return r;
+}
+
+function readItems_(ss, id) {
+  return readSheetAsObjects_(ss, CONFIG.SHEETS.REQUEST_ITEMS)
+    .filter(function (i) { return i.request_id === id; }).map(toClientItem_);
+}
+
+function setRequestFields_(ss, id, fields) {
+  var h = ensureHeader_(ss, CONFIG.SHEETS.REQUESTS, REQUEST_HEADER);
+  var values = h.sheet.getDataRange().getValues();
+  var col = {};
+  h.header.forEach(function (k, i) { col[k] = i; });
+  for (var r = 1; r < values.length; r++) {
+    if (values[r][col.request_id] !== id) continue;
+    Object.keys(fields).forEach(function (k) {
+      if (col[k] == null) return;
+      h.sheet.getRange(r + 1, col[k] + 1).setValue(fields[k]);
+    });
+    return;
+  }
+  throw new Error('ไม่พบคำขอ ' + id);
+}
+
+/** Rewrites this request's item rows through mutate(item); returns { amount, count } of qty > 0 lines. */
+function updateItems_(ss, id, mutate) {
+  var h = ensureHeader_(ss, CONFIG.SHEETS.REQUEST_ITEMS, REQUEST_ITEM_HEADER);
+  var values = h.sheet.getDataRange().getValues();
+  var col = {};
+  h.header.forEach(function (k, i) { col[k] = i; });
+  var amount = 0, count = 0;
+  for (var r = 1; r < values.length; r++) {
+    if (values[r][col.request_id] !== id) continue;
+    var item = {};
+    h.header.forEach(function (k, i) { item[k] = values[r][i]; });
+    item = mutate(item);
+    h.sheet.getRange(r + 1, 1, 1, h.header.length).setValues([h.header.map(function (k) { return item[k] == null ? '' : item[k]; })]);
+    if (Number(item.qty) > 0) { amount += Number(item.amount) || 0; count++; }
+  }
+  return { amount: round2_(amount), count: count };
+}
+
+function canActAsPc_(me, req) {
+  return me.role === 'admin' || splitEmails_(req.assigned_to).indexOf(me.email) !== -1;
+}
+
+function requestPeople_(req) {
+  return uniq_([req.requester_email].concat(splitEmails_(req.assigned_to)).concat([req.confirmed_by]).filter(String));
+}
+
+function uniq_(a) {
+  return a.filter(function (x, i) { return x && a.indexOf(x) === i; });
+}
+
+function round2_(n) { return Math.round((Number(n) || 0) * 100) / 100; }
+
+// ============================================================ email
+
+function appLink_(id, label) {
+  var url = webAppUrl_();
+  if (!url) return '';
+  return '<p><a href="' + url + (id ? '?req=' + encodeURIComponent(id) : '') + '">' + (label || 'เปิดระบบ Store Reorder') + '</a></p>';
+}
+
+function mailPeople_(to, subject, html) {
+  to = uniq_((to || []).map(function (e) { return String(e).toLowerCase(); }));
+  if (!to.length) return;
+  MailApp.sendEmail({ to: to.join(','), subject: subject, htmlBody: html });
+}
+
+function mailAdmins_(subject, html) {
+  mailPeople_(adminEmails_(), subject, html);
+}
+
+function itemsTable_(items) {
+  return '<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;font-size:13px">' +
+    '<tr><th>PC</th><th>รหัส</th><th>สินค้า</th><th>จำนวน</th><th>บาท</th></tr>' +
+    items.filter(function (i) { return Number(i.qty) > 0; }).map(function (i) {
+      return '<tr><td>' + esc_(i.pc_code) + '</td><td>' + esc_(i.sku) + '</td><td>' + esc_(i.name) + '</td><td align="right">' +
+        esc_(i.qty) + ' ' + esc_(i.unit) + '</td><td align="right">' + fmtMoney_(i.amount) + '</td></tr>';
+    }).join('') + '</table>';
+}
+
+/** Uses Claude when ANTHROPIC_API_KEY is set; any failure falls back to the plain template. */
+function aiDraft_(fn, fallback) {
   try {
-    var ss = db_();
-    var sheet = ensureSheet_(ss, CONFIG.SHEETS.REQUESTS, REQUEST_HEADER);
-    var values = sheet.getDataRange().getValues();
-    var col = {};
-    values[0].forEach(function (h, i) { col[h] = i; });
-    for (var r = 1; r < values.length; r++) {
-      if (values[r][col.request_id] !== id) continue;
-      var obj = {};
-      REQUEST_HEADER.forEach(function (h) { obj[h] = values[r][col[h]]; });
-      var change = mutate(obj);
-      change.decided_at = new Date();
-      Object.keys(change).forEach(function (k) {
-        sheet.getRange(r + 1, col[k] + 1).setValue(change[k]);
-        obj[k] = change[k];
-      });
-      var items = readSheetAsObjects_(ss, CONFIG.SHEETS.REQUEST_ITEMS).filter(function (i) { return i.request_id === id; });
-      return { request: toClientRequest_(obj, items) };
-    }
-    throw new Error('ไม่พบคำขอ ' + id);
-  } finally {
-    lock.releaseLock();
+    if (!PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY')) return fallback;
+    var text = fn();
+    return text ? text : fallback;
+  } catch (e) {
+    return fallback;
   }
 }
 
-function notifyAdminsNewRequest_(id, me, line, month, total, available, items) {
-  var admins = adminEmails_();
-  if (!admins.length) return;
-  var rows = items.map(function (i) {
-    return '<tr><td>' + esc_(i.pc) + '</td><td>' + esc_(i.sku) + '</td><td>' + esc_(i.name) + '</td><td align="right">' +
-      esc_(i.qty) + ' ' + esc_(i.unit) + '</td><td align="right">' + fmtMoney_(Number(i.qty) * (Number(i.unitCost) || 0)) + '</td></tr>';
-  }).join('');
-  MailApp.sendEmail({
-    to: admins.join(','),
-    subject: '[Store Reorder] คำขอสั่งซื้อใหม่ ' + id + ' จาก ' + (me.name || me.email) +
-      (total > available ? ' (เกินงบ)' : ''),
-    htmlBody:
-      '<p><b>' + esc_(id) + '</b> โดย ' + esc_(me.name) + ' (' + esc_(me.email) + ')</p>' +
-      '<p>Budget: ' + esc_(line.label) + '<br>ใช้เดือน: ' + THAI_MONTH_NAMES[month] +
-      '<br>ยอดรวม: <b>' + fmtMoney_(total) + '</b> บาท · งบคงเหลือก่อนคำขอนี้: ' + fmtMoney_(available) + ' บาท' +
-      (total > available ? ' <b style="color:#b23b2e">เกินงบ ' + fmtMoney_(total - available) + ' บาท</b>' : '') + '</p>' +
-      '<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse">' +
-      '<tr><th>PC</th><th>รหัส</th><th>สินค้า</th><th>จำนวน</th><th>บาท</th></tr>' + rows + '</table>' +
-      '<p><a href="' + webAppUrl_() + '">เปิดระบบเพื่ออนุมัติ</a></p>'
-  });
+/** (5) email to the PC owners with the suggested list and a link to confirm. */
+function sendPcConfirmEmail_(id, pc, pcName, owners, items, note, isReminder) {
+  var fallback = 'เรียน ผู้รับผิดชอบ ' + esc_(pc) + ' ' + esc_(pcName) + '<br><br>' +
+    'ระบบแนะนำให้สั่งซื้อรายการด้านล่าง กรุณายืนยัน/แก้จำนวน และเลือก Budget กับเดือนที่จะใช้ของ ภายใน ' +
+    (CONFIG.REMINDER_AFTER_DAYS || 3) + ' วัน' + (note ? '<br>หมายเหตุจาก Admin: ' + esc_(note) : '');
+  var body = aiDraft_(function () {
+    return draftReorderEmail_(pc + ' ' + pcName, items.map(function (i) {
+      return { name: i.name, balance: '', suggested_qty: i.qty + ' ' + i.unit };
+    })).replace(/\{\{CONFIRM_LINK\}\}/g, '').replace(/\n/g, '<br>');
+  }, fallback);
+  mailPeople_(owners, (isReminder ? '[เตือน] ' : '') + '[Store Reorder] ยืนยันรายการสั่งซื้อ ' + pc + ' (' + id + ')',
+    body + itemsTable_(items) + appLink_(id, 'ยืนยัน / แก้จำนวน / ไม่สั่ง'));
+}
+
+/** (7) tell admins a request is ready for review, with an AI summary when available. */
+function notifyAdminsForReview_(id) {
+  var ss = db_();
+  var req = findRequest_(ss, id);
+  var items = readItems_(ss, id);
+  var over = req.over_budget ? ' (เกินงบ)' : '';
+  var summary = aiDraft_(function () {
+    return summarizeConfirmationForAdmin_(req.pc_code + ' ' + req.pc_name, items.filter(function (i) { return i.qty > 0; })
+      .map(function (i) { return { name: i.name, qty: i.qty, amount: i.amount }; }), req.note).replace(/\n/g, '<br>');
+  }, '');
+  var from = req.source === 'round' ? req.confirmed_by : (req.requester_name || req.requester_email);
+  mailAdmins_('[Store Reorder] รออนุมัติ ' + id + ' ' + (req.pc_code || '') + ' ยืนยันโดย ' + from + over,
+    (summary ? '<p>' + summary + '</p>' : '') +
+    '<p><b>' + esc_(id) + '</b> · Budget: ' + esc_(req.budget_label) + ' · ใช้เดือน ' + THAI_MONTH_NAMES[Number(req.budget_month)] +
+    '<br>ยอดรวม <b>' + fmtMoney_(req.total) + '</b> บาท · งบคงเหลือก่อนคำขอนี้ ' + fmtMoney_(req.available_at_submit) + ' บาท' +
+    (over ? ' <b style="color:#b23b2e">เกินงบ ' + fmtMoney_(Number(req.total) - Number(req.available_at_submit)) + ' บาท</b>' : '') +
+    (req.note ? '<br>หมายเหตุ: ' + esc_(req.note) : '') + '</p>' + itemsTable_(items) + appLink_(id, 'เปิดระบบเพื่อตรวจ/อนุมัติ'));
 }
 
 function fmtMoney_(n) {

@@ -673,12 +673,39 @@ function applySession(info) {
   const blocked = GAS && !active;
   $('#filesPanel').hidden = blocked;
   if (blocked) { $('#summary').hidden = true; $('#work').hidden = true; } else recompute();
-  if (active) { if (!isAdmin()) $('#reqFilter').value = ''; loadServerData(); refreshBudget(); loadRequests(true); }
+  if (active) {
+    loadServerData(); refreshBudget(); loadMasterPc();
+    loadRequests(true).then(openDeepLink);
+  }
+  $('#roundBox').hidden = !isAdmin();
 }
+
+// Links in emails are <exec url>?req=REQ-…; Apps Script exposes the outer URL's params this way
+function openDeepLink() {
+  if (!GAS || !google.script.url) return;
+  google.script.url.getLocation(loc => {
+    const id = loc && loc.parameter && loc.parameter.req;
+    if (!id) return;
+    $('#reqFilter').value = '';
+    focusReq = id;
+    document.querySelector('.tab[data-tab="requests"]').click();
+  });
+}
+
+// Static host (GitHub Pages / Vercel): no server, so point people at the full system
+const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycby9p8MjJMZIeOufAyn3C6G9j4W3Q5iJZlgOrzfgt0vSOZTBCzyDjuI8a0GaXQZQlW4D/exec';
 
 function renderGate() {
   const g = $('#gate');
-  if (!GAS || isMember()) { g.hidden = true; return; }
+  if (!GAS) {
+    g.hidden = false;
+    g.innerHTML = `<div class="gate wide"><h2>เวอร์ชันออฟไลน์ (เก็บข้อมูลในเครื่องนี้เท่านั้น)</h2>
+      <p class="hint">บันทึกข้อมูลถาวรให้ทุกคนเห็น · ส่งอีเมล · ระบบสมาชิก · ส่งคำขอตาม workflow (PC ยืนยัน → ตรวจงบ → PR/PO → รับของ)
+      ใช้ได้ที่ระบบเต็มบน Google Apps Script (login ด้วยบัญชีบริษัท)</p>
+      <p><a class="btn" href="${APPS_SCRIPT_URL}" target="_top">เปิดระบบเต็ม</a></p></div>`;
+    return;
+  }
+  if (isMember()) { g.hidden = true; return; }
   g.hidden = false;
   const st = me ? me.status : 'loading';
   if (st === 'loading') { g.innerHTML = '<div class="gate"><p class="hint">กำลังตรวจสอบสิทธิ์…</p></div>'; return; }
@@ -834,76 +861,320 @@ $('#budgetFile').addEventListener('change', async e => {
   }
 });
 
-// ------------------------------------------------------------ requests (user: mine, admin: all)
+// ------------------------------------------------------------ requests — workflow steps 5–10 (server: src/Requests.js)
 
-const STATUS_CLASS = { 'รออนุมัติ': 'st-pending', 'อนุมัติ': 'st-approved', 'ไม่อนุมัติ': 'st-rejected', 'ยกเลิก': 'st-cancelled' };
+const ST = {
+  WAIT_PC: 'รอ PC ยืนยัน', PC_REJECTED: 'PC ปฏิเสธ', PENDING: 'รออนุมัติ', OVER_WAIT: 'รอหัวหน้าอนุมัติเกินงบ',
+  APPROVED: 'อนุมัติ', REJECTED: 'ไม่อนุมัติ', CANCELLED: 'ยกเลิก', PO: 'ออก PR/PO แล้ว', RECEIVED: 'รับของแล้ว'
+};
+const STATUS_CLASS = {
+  [ST.WAIT_PC]: 'st-pending', [ST.PENDING]: 'st-pending', [ST.OVER_WAIT]: 'st-pending',
+  [ST.APPROVED]: 'st-approved', [ST.PO]: 'st-approved', [ST.RECEIVED]: 'st-approved',
+  [ST.REJECTED]: 'st-rejected', [ST.PC_REJECTED]: 'st-cancelled', [ST.CANCELLED]: 'st-cancelled'
+};
+const FLOW = [ST.WAIT_PC, ST.PENDING, ST.APPROVED, ST.PO, ST.RECEIVED];
+let focusReq = null;       // request id to scroll to (deep link)
+let editingReq = null;     // request id whose confirm form is open
+let masterPc = [];
+
+const mine = r => r.assigned.includes(me.email);
+const isManagerOf = r => String(r.manager_email || '').toLowerCase() === me.email;
+
+/** Requests that are waiting on me right now. */
+function needsMe(r) {
+  if (r.status === ST.WAIT_PC) return mine(r) || (isAdmin() && !r.assigned.length);
+  if (r.status === ST.OVER_WAIT) return isManagerOf(r);
+  if (isAdmin()) return [ST.PENDING, ST.APPROVED, ST.PO].includes(r.status);
+  return false;
+}
 
 async function loadRequests(badgeOnly = false) {
   if (!isMember()) return;
   if (!badgeOnly) $('#reqInfo').textContent = 'กำลังโหลด…';
-  try {
-    requests = isAdmin() ? await gasCall('listAllRequests', '') : await gasCall('listMyRequests');
-  } catch (e) {
-    $('#reqInfo').textContent = 'โหลดไม่ได้: ' + errMsg(e); return;
-  }
-  const pending = requests.filter(r => r.status === 'รออนุมัติ').length;
-  $('#reqBadge').hidden = !pending;
-  $('#reqBadge').textContent = pending;
+  try { requests = await gasCall('listMyRequests'); }
+  catch (e) { $('#reqInfo').textContent = 'โหลดไม่ได้: ' + errMsg(e); return; }
+  updateReqBadge();
   if (!badgeOnly || activeTab === 'requests') renderRequests();
+}
+
+function updateReqBadge() {
+  const n = requests.filter(needsMe).length;
+  $('#reqBadge').hidden = !n;
+  $('#reqBadge').textContent = n;
+}
+
+/** Budget still free for r's line/month, not counting r itself. */
+function availExcluding(r) {
+  if (!budgetOpts || !r.budget_key) return null;
+  const line = budgetOpts.lines.find(l => l.key === r.budget_key);
+  if (!line) return null;
+  const b = budgetAvail(line, Number(r.budget_month));
+  const holds = [ST.PENDING, ST.OVER_WAIT, ST.APPROVED, ST.PO, ST.RECEIVED].includes(r.status);
+  return b.available + (holds ? Number(r.total) : 0);
 }
 
 function renderRequests() {
   const f = $('#reqFilter').value;
-  const list = requests.filter(r => !f || r.status === f);
-  $('#reqInfo').textContent = `${list.length} คำขอ${isAdmin() ? ' (ทุกคน)' : ' ของฉัน'}`;
-  if (!list.length) { $('#reqList').innerHTML = '<div class="empty">ไม่มีคำขอ</div>'; return; }
-  $('#reqList').innerHTML = list.map(r => `
-    <div class="req-card" data-id="${esc(r.request_id)}">
-      <div class="req-head">
-        <span class="id">${esc(r.request_id)}</span>
-        <span class="tag ${STATUS_CLASS[r.status] || ''}">${esc(r.status)}</span>
-        ${r.over_budget ? '<span class="tag st-rejected">เกินงบ</span>' : ''}
-        <span>${esc(r.requester_name || r.requester_email)}</span>
-        <span class="amt">${money(r.total)}</span>
+  const list = requests.filter(r => !f || (f === 'todo' ? needsMe(r) : r.status === f));
+  // Dashboard strip: count + value per status
+  const by = {};
+  for (const r of requests) { by[r.status] = by[r.status] || { n: 0, v: 0 }; by[r.status].n++; by[r.status].v += Number(r.total) || 0; }
+  $('#reqDash').innerHTML = Object.values(ST).filter(s => by[s]).map(s =>
+    `<button class="dash-chip ${STATUS_CLASS[s]}" data-filter="${esc(s)}"><b>${by[s].n}</b> ${esc(s)}<span>${money(by[s].v)}</span></button>`).join('');
+  $('#reqInfo').textContent = `${list.length} คำขอ${isAdmin() ? '' : ' ที่เกี่ยวกับฉัน'}`;
+  if (!list.length) {
+    $('#reqList').innerHTML = `<div class="empty">${f === 'todo' ? 'ไม่มีงานที่รอคุณ 🎉' : 'ไม่มีคำขอ'}</div>`;
+    return;
+  }
+  $('#reqList').innerHTML = list.map(renderReqCard).join('');
+  if (focusReq) {
+    const el = document.querySelector(`.req-card[data-id="${CSS.escape(focusReq)}"]`);
+    if (el) {
+      el.classList.add('focus'); el.scrollIntoView({ block: 'center' });
+      const r = requests.find(x => x.request_id === focusReq);
+      if (r && r.status === ST.WAIT_PC && (mine(r) || isAdmin()) && editingReq !== focusReq) { editingReq = focusReq; renderRequests(); }
+    }
+    focusReq = null;
+  }
+}
+
+function renderReqCard(r) {
+  const step = FLOW.indexOf(r.status === ST.OVER_WAIT ? ST.PENDING : r.status);
+  const avail = availExcluding(r);
+  const overNow = avail != null && Number(r.total) > avail;
+  const who = r.source === 'round' ? `ส่งให้ ${esc(r.pc_code)} ${esc(r.pc_name)} · ผู้รับผิดชอบ ${esc(r.assigned.join(', ') || '— ยังไม่ได้ตั้งใน Master PC')}`
+    : `ขอโดย ${esc(r.requester_name || r.requester_email)} · PC ${esc(r.pc_code)}`;
+  const acts = [];
+  if (r.status === ST.WAIT_PC && (mine(r) || isAdmin())) acts.push('<button class="btn sm" data-act="edit">ยืนยัน / แก้จำนวน</button>', '<button class="btn sm ghost" data-act="pcreject">ไม่สั่งรอบนี้</button>');
+  if (r.status === ST.PENDING && isAdmin()) {
+    if (overNow && r.manager_decision !== 'อนุมัติ') acts.push('<button class="btn sm" data-act="overbudget">ขออนุมัติเกินงบ (หัวหน้า PC)</button>');
+    else acts.push('<button class="btn sm" data-act="approve">อนุมัติ</button>');
+    acts.push('<button class="btn sm ghost" data-act="reject">ไม่อนุมัติ</button>');
+  }
+  if (r.status === ST.OVER_WAIT && (isManagerOf(r) || isAdmin())) acts.push('<button class="btn sm" data-act="mgrok">หัวหน้าอนุมัติเกินงบ</button>', '<button class="btn sm ghost" data-act="mgrno">หัวหน้าไม่อนุมัติ</button>');
+  if (r.status === ST.APPROVED && isAdmin()) acts.push('<button class="btn sm" data-act="po">ออก PR/PO</button>');
+  if (r.status === ST.PO && isAdmin()) acts.push('<button class="btn sm" data-act="received">รับของเข้าแล้ว</button>');
+  if ([ST.WAIT_PC, ST.PENDING, ST.OVER_WAIT].includes(r.status) && (r.requester_email === me.email || isAdmin())) acts.push('<button class="btn sm ghost" data-act="cancel">ยกเลิกคำขอ</button>');
+
+  return `<div class="req-card ${needsMe(r) ? 'todo' : ''}" data-id="${esc(r.request_id)}">
+    <div class="req-head">
+      <span class="id">${esc(r.request_id)}</span>
+      <span class="tag ${STATUS_CLASS[r.status] || ''}">${esc(r.status)}</span>
+      ${overNow && ![ST.REJECTED, ST.CANCELLED, ST.PC_REJECTED].includes(r.status) ? '<span class="tag st-rejected">เกินงบ</span>' : ''}
+      ${r.manager_decision ? `<span class="tag ${r.manager_decision === 'อนุมัติ' ? 'st-approved' : 'st-rejected'}">หัวหน้า${esc(r.manager_decision)}เกินงบ</span>` : ''}
+      <span class="amt">${money(r.total)}</span>
+    </div>
+    ${step >= 0 ? `<ol class="flow">${FLOW.map((s, i) => `<li class="${i < step ? 'done' : i === step ? 'now' : ''}">${esc(s.replace(' แล้ว', ''))}</li>`).join('')}</ol>` : ''}
+    <div class="req-meta">${who} · สร้าง ${esc(r.created_at)} · ${r.item_count} รายการ</div>
+    ${r.budget_label ? `<div class="req-meta">Budget: ${esc(r.budget_label)} · ใช้เดือน ${esc(r.month_label)}${avail != null ? ` · งบคงเหลือ (ไม่รวมคำขอนี้) <b class="${overNow ? 'over' : 'ok'}">${money(avail)}</b>` : ''}</div>` : ''}
+    ${r.note ? `<div class="req-meta">หมายเหตุ: ${esc(r.note)}</div>` : ''}
+    ${r.confirmed_by ? `<div class="req-meta">ยืนยันโดย ${esc(r.confirmed_by)} ${esc(r.confirmed_at)}</div>` : ''}
+    ${r.status === ST.OVER_WAIT || r.manager_decision ? `<div class="req-meta">หัวหน้า PC: ${esc(r.manager_email)}${r.manager_note ? ' — ' + esc(r.manager_note) : ''}</div>` : ''}
+    ${r.decided_by ? `<div class="req-meta">Admin ${esc(r.decided_by)} ${esc(r.decided_at)}${r.admin_note ? ' — ' + esc(r.admin_note) : ''}</div>` : ''}
+    ${r.po_no ? `<div class="req-meta">PR/PO: <b>${esc(r.po_no)}</b> ${esc(r.po_at)}${r.received_at ? ' · รับของ ' + esc(r.received_at) : ''}</div>` : ''}
+    ${editingReq === r.request_id ? renderConfirmForm(r) : `<details><summary>ดูรายการสินค้า</summary>${reqItemsTable(r, false)}</details>`}
+    ${acts.length && editingReq !== r.request_id ? `<div class="req-actions">${acts.join('')}</div>` : ''}
+  </div>`;
+}
+
+function reqItemsTable(r, editable) {
+  return `<div class="table-wrap" style="max-height:none;margin-top:6px"><table class="grid"><thead><tr>
+    <th>PC</th><th>รหัส</th><th>สินค้า</th>${r.source === 'round' ? '<th class="n">แนะนำ</th>' : ''}<th class="n">จำนวน</th><th>หน่วย</th><th class="n">ราคา/หน่วย</th><th class="n">รวม</th><th>หมายเหตุ</th>
+  </tr></thead><tbody>${r.items.map(i => `<tr data-sku="${esc(i.sku)}" class="${!editable && i.qty === 0 ? 'dim' : ''}">
+    <td class="pc">${esc(i.pc_code)}</td><td class="sku">${esc(i.sku)}</td><td class="name">${esc(i.name)}</td>
+    ${r.source === 'round' ? `<td class="n dim">${fmt(i.suggested_qty)}</td>` : ''}
+    <td class="n">${editable ? `<input class="qty" type="number" min="0" step="1" data-eq value="${i.qty}" data-cost="${i.unit_cost}">` : fmt(i.qty)}</td>
+    <td>${esc(i.unit)}</td><td class="n">${fmt(i.unit_cost, 2)}</td><td class="n" data-amt>${fmt(i.amount, 2)}</td>
+    <td>${editable ? `<input class="note" data-en value="${esc(i.note)}">` : esc(i.note)}</td>
+  </tr>`).join('')}</tbody></table></div>`;
+}
+
+/** Step 6 form: edit quantities, choose budget line + month, confirm. */
+function renderConfirmForm(r) {
+  const pcDefault = (masterPc.find(p => p.pc_code === r.pc_code) || {}).default_budget_key || '';
+  const cur = r.budget_key || pcDefault;
+  const opts = budgetOpts && budgetOpts.lines.length
+    ? budgetOpts.lines.map(l => `<option value="${esc(l.key)}" ${l.key === cur ? 'selected' : ''}>${esc(l.label)}</option>`).join('')
+    : '<option value="">— ยังไม่มีข้อมูล Budget —</option>';
+  const m = Number(r.budget_month) || new Date().getMonth() + 1;
+  return `<div class="confirm-form" data-form="${esc(r.request_id)}">
+    <p class="hint">แก้จำนวนได้ (ใส่ 0 = ไม่เอารายการนั้น) แล้วเลือก Budget และเดือนที่จะใช้ของ</p>
+    ${reqItemsTable(r, true)}
+    <div class="submit-grid" style="margin-top:10px">
+      <div class="field"><label>Budget</label>
+        <input type="search" data-bsearch placeholder="ค้นหา Location / GL เช่น 530090 cookies">
+        <select data-bsel size="5">${opts}</select></div>
+      <div class="field"><label>ใช้ของเดือน</label>
+        <select data-msel>${THAI_MONTH_FULL.slice(1).map((n, i) => `<option value="${i + 1}" ${i + 1 === m ? 'selected' : ''}>${n} ${budgetOpts ? budgetOpts.year || '' : ''}</option>`).join('')}</select>
+        <div class="budget-info" data-binfo></div>
+        <label>หมายเหตุถึง Admin</label><textarea rows="2" data-note>${esc(r.note)}</textarea>
+        <div class="req-actions"><button class="btn" data-act="confirm">ยืนยันส่งให้ Admin</button><button class="btn ghost" data-act="closeedit">ปิด</button></div>
       </div>
-      <div class="req-meta">Budget: ${esc(r.budget_label)} · ใช้เดือน ${esc(r.month_label)} · ส่งเมื่อ ${esc(r.created_at)} ·
-        ${r.item_count} รายการ · งบคงเหลือตอนส่ง ${money(r.available_at_submit)}</div>
-      ${r.note ? `<div class="req-meta">หมายเหตุผู้ขอ: ${esc(r.note)}</div>` : ''}
-      ${r.decided_by ? `<div class="req-meta">${esc(r.status)} โดย ${esc(r.decided_by)} ${esc(r.decided_at)}${r.admin_note ? ' — ' + esc(r.admin_note) : ''}</div>` : ''}
-      <details><summary>ดูรายการสินค้า</summary>
-        <div class="table-wrap" style="max-height:none;margin-top:6px"><table class="grid"><thead><tr>
-          <th>PC</th><th>รหัส</th><th>สินค้า</th><th class="n">จำนวน</th><th>หน่วย</th><th class="n">ราคา/หน่วย</th><th class="n">รวม</th><th>หมายเหตุ</th>
-        </tr></thead><tbody>${r.items.map(i => `<tr>
-          <td class="pc">${esc(i.pc_code)}</td><td class="sku">${esc(i.sku)}</td><td class="name">${esc(i.name)}</td>
-          <td class="n">${fmt(i.qty)}</td><td>${esc(i.unit)}</td><td class="n">${fmt(i.unit_cost, 2)}</td><td class="n">${fmt(i.amount, 2)}</td><td>${esc(i.note)}</td>
-        </tr>`).join('')}</tbody></table></div>
-      </details>
-      ${r.status === 'รออนุมัติ' ? `<div class="req-actions">
-        ${isAdmin() ? '<button class="btn sm" data-act="approve">อนุมัติ</button><button class="btn sm ghost" data-act="reject">ไม่อนุมัติ</button>' : ''}
-        ${r.requester_email === me.email ? '<button class="btn sm ghost" data-act="cancel">ยกเลิกคำขอ</button>' : ''}
-      </div>` : ''}
-    </div>`).join('');
+    </div></div>`;
+}
+
+function updateConfirmInfo(form) {
+  let total = 0;
+  form.querySelectorAll('tr[data-sku]').forEach(tr => {
+    const q = tr.querySelector('[data-eq]');
+    const amt = Math.max(0, Math.round(Number(q.value) || 0)) * Number(q.dataset.cost);
+    tr.querySelector('[data-amt]').textContent = fmt(amt, 2);
+    total += amt;
+  });
+  const line = budgetOpts && budgetOpts.lines.find(l => l.key === form.querySelector('[data-bsel]').value);
+  const mon = Number(form.querySelector('[data-msel]').value);
+  const box = form.querySelector('[data-binfo]');
+  if (!line) { box.innerHTML = `<div class="row total"><span>ยอดรวม</span><b>${money(total)}</b></div>`; return; }
+  const b = budgetAvail(line, mon);
+  box.innerHTML = `<div class="row"><span>งบเดือน${THAI_MONTH_FULL[mon]}</span><b>${money(b.plan)}</b></div>
+    <div class="row"><span>ใช้จริง + คำขออื่น</span><b>${money(b.actual + b.reserved)}</b></div>
+    <div class="row"><span>คงเหลือ</span><b>${money(b.available)}</b></div>
+    <div class="row total"><span>ยอดรวมคำขอนี้</span><b>${money(total)}</b></div>
+    <div class="row"><span>หลังยืนยัน</span><b class="${b.available - total < 0 ? 'over' : 'ok'}">${money(b.available - total)}${b.available - total < 0 ? ' (เกินงบ — Admin จะส่งขออนุมัติหัวหน้า)' : ''}</b></div>`;
 }
 
 $('#reqFilter').addEventListener('change', renderRequests);
-$('#btnReloadReq').addEventListener('click', () => loadRequests());
+$('#btnReloadReq').addEventListener('click', () => { loadRequests(); refreshBudget(); });
+$('#reqDash').addEventListener('click', e => {
+  const c = e.target.closest('[data-filter]');
+  if (c) { $('#reqFilter').value = c.dataset.filter; renderRequests(); }
+});
+$('#reqList').addEventListener('input', e => {
+  const form = e.target.closest('[data-form]');
+  if (!form) return;
+  if (e.target.matches('[data-bsearch]')) {
+    const words = e.target.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const sel = form.querySelector('[data-bsel]'), cur = sel.value;
+    sel.innerHTML = budgetOpts.lines.filter(l => words.every(w => (l.label + ' ' + l.expenseGroup).toLowerCase().includes(w)))
+      .map(l => `<option value="${esc(l.key)}" ${l.key === cur ? 'selected' : ''}>${esc(l.label)}</option>`).join('');
+  }
+  updateConfirmInfo(form);
+});
+$('#reqList').addEventListener('change', e => { const form = e.target.closest('[data-form]'); if (form) updateConfirmInfo(form); });
+
 $('#reqList').addEventListener('click', async e => {
   const btn = e.target.closest('[data-act]');
   if (!btn) return;
   const id = btn.closest('[data-id]').dataset.id, act = btn.dataset.act;
-  let note = '';
-  if (act === 'reject') { note = prompt(`เหตุผลที่ไม่อนุมัติ ${id}:`); if (note === null) return; }
-  else if (act === 'approve') { note = prompt(`อนุมัติ ${id} — หมายเหตุ (ไม่บังคับ):`, ''); if (note === null) return; }
-  else if (!confirm(`ยกเลิกคำขอ ${id}?`)) return;
+  const r = requests.find(x => x.request_id === id);
+  if (act === 'edit') {
+    editingReq = id; renderRequests();
+    const form = document.querySelector(`[data-form="${CSS.escape(id)}"]`);
+    if (form) { updateConfirmInfo(form); form.scrollIntoView({ block: 'start' }); }
+    return;
+  }
+  if (act === 'closeedit') { editingReq = null; renderRequests(); return; }
+
+  let call;
+  if (act === 'confirm') {
+    const form = btn.closest('[data-form]');
+    const budgetKey = form.querySelector('[data-bsel]').value, month = Number(form.querySelector('[data-msel]').value);
+    if (!budgetKey) return toast('กรุณาเลือก Budget');
+    const items = [...form.querySelectorAll('tr[data-sku]')].map(tr => ({
+      sku: tr.dataset.sku, qty: Math.max(0, Math.round(Number(tr.querySelector('[data-eq]').value) || 0)), note: tr.querySelector('[data-en]').value
+    }));
+    if (!confirm(`ยืนยัน ${id} ส่งให้ Admin ตรวจ?`)) return;
+    call = () => gasCall('confirmRequest', id, { items, budgetKey, month, note: form.querySelector('[data-note]').value });
+  } else if (act === 'pcreject') {
+    const note = prompt(`${r.pc_code}: ไม่สั่งรอบนี้ — เหตุผล (ไม่บังคับ)`, ''); if (note === null) return;
+    call = () => gasCall('rejectByPc', id, note);
+  } else if (act === 'approve') {
+    const note = prompt(`อนุมัติ ${id} — หมายเหตุ (ไม่บังคับ)`, ''); if (note === null) return;
+    call = () => gasCall('decideRequest', id, 'approve', note);
+  } else if (act === 'reject') {
+    const note = prompt(`เหตุผลที่ไม่อนุมัติ ${id}:`); if (note === null) return;
+    call = () => gasCall('decideRequest', id, 'reject', note);
+  } else if (act === 'overbudget') {
+    const mgr = prompt('อีเมลหัวหน้า PC ที่จะขออนุมัติเกินงบ:', r.manager_email || ''); if (mgr === null) return;
+    const why = prompt('เหตุผล/รายละเอียดเพิ่มเติม (ไม่บังคับ):', ''); if (why === null) return;
+    call = () => gasCall('requestOverBudget', id, mgr, why);
+  } else if (act === 'mgrok' || act === 'mgrno') {
+    const note = prompt(act === 'mgrok' ? 'อนุมัติเกินงบ — หมายเหตุ (ไม่บังคับ)' : 'เหตุผลที่ไม่อนุมัติ:', ''); if (note === null) return;
+    call = () => gasCall('managerDecision', id, act === 'mgrok', note);
+  } else if (act === 'po') {
+    const po = prompt(`เลขที่ PR/PO ของ ${id}:`, ''); if (!po) return;
+    call = () => gasCall('issuePo', id, po);
+  } else if (act === 'received') {
+    const note = prompt(`รับของตาม ${id} เข้า Store แล้ว — หมายเหตุ (ไม่บังคับ)`, ''); if (note === null) return;
+    call = () => gasCall('markReceived', id, note);
+  } else if (act === 'cancel') {
+    if (!confirm(`ยกเลิกคำขอ ${id}?`)) return;
+    call = () => gasCall('cancelMyRequest', id);
+  } else return;
+
   btn.disabled = true;
   try {
-    if (act === 'cancel') await gasCall('cancelMyRequest', id);
-    else await gasCall('decideRequest', id, act, note);
-    toast(`${id}: ${{ approve: 'อนุมัติแล้ว', reject: 'ไม่อนุมัติ', cancel: 'ยกเลิกแล้ว' }[act]} — แจ้งผู้เกี่ยวข้องทางอีเมลแล้ว`);
-    await loadRequests(); refreshBudget();
+    requests = await call();
+    editingReq = null;
+    updateReqBadge(); renderRequests(); refreshBudget();
+    toast(`${id}: บันทึกแล้ว — แจ้งผู้เกี่ยวข้องทางอีเมลแล้ว`);
   } catch (err) {
     toast('ไม่สำเร็จ: ' + errMsg(err)); btn.disabled = false;
   }
+});
+
+// Step 5: admin sends the cart to each PC's owners for confirmation
+$('#btnRound').addEventListener('click', async () => {
+  const items = cartRows().filter(x => x.c.qty > 0);
+  if (!items.length) return toast('ยังไม่ได้เลือกรายการ');
+  const pcs = [...new Set(items.map(x => x.r.pc || x.r.group))];
+  const noOwner = pcs.filter(pc => !(masterPc.find(p => p.pc_code === pc) || {}).owner_emails);
+  if (!confirm(`ส่ง ${items.length} รายการ แยก ${pcs.length} PC ให้ผู้รับผิดชอบยืนยันทางอีเมล?` +
+    (noOwner.length ? `\n\n⚠ ยังไม่มีอีเมลผู้รับผิดชอบใน Master PC: ${noOwner.join(', ')}\n(สร้างคำขอไว้ แต่ยังไม่ส่งอีเมล — ตั้งในแท็บ Admin)` : ''))) return;
+  $('#btnRound').disabled = true;
+  try {
+    const res = await gasCall('createRound', items.map(({ r, c }) => ({
+      sku: r.sku, name: r.name, pc: r.pc || r.group, pcName: r.pcName, unit: r.unit, qty: c.qty, unitCost: r.cost, note: c.note
+    })), $('#roundNote').value);
+    state.cart = {}; $('#roundNote').value = ''; save(); renderCards(); renderCart();
+    toast(`สร้างรอบ ${res.roundId}: ${res.created.length} PC` + (res.noOwner.length ? ` · ยังไม่ส่งอีเมล: ${res.noOwner.join(', ')}` : ' · ส่งอีเมลครบแล้ว'));
+    $('#reqFilter').value = ST.WAIT_PC;
+    await loadRequests();
+    document.querySelector('.tab[data-tab="requests"]').click();
+  } catch (e) {
+    toast('ส่งไม่สำเร็จ: ' + errMsg(e));
+  } finally {
+    $('#btnRound').disabled = false;
+  }
+});
+
+// ------------------------------------------------------------ Master PC (owner + manager emails per PC)
+
+async function loadMasterPc() {
+  try { masterPc = await gasCall('listMasterPc'); } catch (e) { masterPc = []; }
+  if (activeTab === 'admin') renderMasterPc();
+}
+
+function renderMasterPc() {
+  const known = new Map(masterPc.map(p => [p.pc_code, p]));
+  // PCs seen in the Store data but not yet in master_pc
+  for (const r of merged.rows) if (r.pc && !known.has(r.pc)) known.set(r.pc, { pc_code: r.pc, pc_name: r.pcName, owner_emails: '', manager_email: '', default_budget_key: '' });
+  const lines = budgetOpts ? budgetOpts.lines : [];
+  const list = [...known.values()].sort((a, b) => a.pc_code.localeCompare(b.pc_code));
+  $('#tblMasterPc').innerHTML = `<thead><tr><th>PC</th><th>ผู้รับผิดชอบ (อีเมล, คั่นด้วย ,)</th><th>หัวหน้า (อนุมัติเกินงบ)</th><th>Budget ตั้งต้น</th><th></th></tr></thead>
+    <tbody>${list.map(p => `<tr data-pc="${esc(p.pc_code)}" class="${p.owner_emails ? '' : 'sel'}">
+      <td class="sku">${esc(p.pc_code)}<div class="pc">${esc(p.pc_name)}</div></td>
+      <td><input data-f="owner_emails" value="${esc(p.owner_emails)}" placeholder="name@planbmedia.co.th"></td>
+      <td><input data-f="manager_email" value="${esc(p.manager_email)}"></td>
+      <td><select data-f="default_budget_key"><option value="">—</option>${lines.map(l => `<option value="${esc(l.key)}" ${l.key === p.default_budget_key ? 'selected' : ''}>${esc(l.label)}</option>`).join('')}</select></td>
+      <td><button class="btn sm ghost" data-savepc>บันทึก</button></td>
+    </tr>`).join('')}</tbody>`;
+}
+
+$('#tblMasterPc').addEventListener('click', async e => {
+  const btn = e.target.closest('[data-savepc]');
+  if (!btn) return;
+  const tr = btn.closest('tr');
+  const val = f => tr.querySelector(`[data-f="${f}"]`).value;
+  btn.disabled = true;
+  try {
+    masterPc = await gasCall('saveMasterPc', { pc_code: tr.dataset.pc, pc_name: tr.querySelector('.pc').textContent,
+      owner_emails: val('owner_emails'), manager_email: val('manager_email'), default_budget_key: val('default_budget_key') });
+    toast(`บันทึก ${tr.dataset.pc} แล้ว`); renderMasterPc();
+  } catch (err) { toast('บันทึกไม่สำเร็จ: ' + errMsg(err)); btn.disabled = false; }
+});
+$('#btnTrigger').addEventListener('click', async () => {
+  try { toast(await gasCall('installReminderTrigger')); } catch (e) { toast('ตั้งไม่สำเร็จ: ' + errMsg(e)); }
 });
 
 // ------------------------------------------------------------ admin: members + budget status
@@ -912,6 +1183,7 @@ let members = null;
 
 async function renderAdmin() {
   if (!isAdmin()) return;
+  renderMasterPc();
   $('#budgetStatus').textContent = !budgetOpts ? 'กำลังโหลด…'
     : budgetOpts.lines.length ? `มี Budget ${budgetOpts.lines.length} รายการ ปี ${budgetOpts.year || '-'}` : 'ยังไม่มีข้อมูล Budget';
   if (!members) {
@@ -959,6 +1231,8 @@ recompute();
 if (GAS) {
   applySession({ status: 'loading' });
   gasCall('getSessionInfo').then(applySession, e => applySession({ status: 'error', error: errMsg(e) }));
+} else {
+  renderGate(); // offline banner pointing to the full Apps Script system
 }
 })();
 </script>

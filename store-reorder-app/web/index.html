@@ -123,6 +123,16 @@
         </div>
         <div id="cartBody"></div>
 
+        <div id="roundBox" class="submit-box" hidden>
+          <h3>Admin: ส่งให้แต่ละ PC ยืนยัน (workflow ขั้นที่ 5)</h3>
+          <p class="hint">แยกรายการตาม PC แล้วส่งอีเมล (AI ช่วยร่าง ถ้าตั้ง API key) ถึงผู้รับผิดชอบใน Master PC —
+            PC ยืนยัน/แก้จำนวน + เลือก Budget และเดือน → กลับมาให้ Admin ตรวจงบ → PR/PO · ไม่ตอบใน 3 วันระบบเตือนซ้ำ</p>
+          <div class="inline-form">
+            <input id="roundNote" placeholder="หมายเหตุถึงทุก PC (ไม่บังคับ) เช่น ขอคำตอบภายในวันศุกร์" style="flex:1 1 320px">
+            <button id="btnRound" class="btn">ส่งให้ PC ยืนยันทางอีเมล</button>
+          </div>
+        </div>
+
         <div id="submitBox" class="submit-box">
           <h3>ส่งคำขอสั่งซื้อให้ Admin</h3>
           <p id="submitHint" class="hint"></p>
@@ -147,15 +157,22 @@
       <div id="tab-requests" class="tabpane" hidden>
         <div class="bulk">
           <select id="reqFilter">
-            <option value="รออนุมัติ">รออนุมัติ</option>
-            <option value="อนุมัติ">อนุมัติ</option>
-            <option value="ไม่อนุมัติ">ไม่อนุมัติ</option>
-            <option value="ยกเลิก">ยกเลิก</option>
+            <option value="todo">รอฉันดำเนินการ</option>
             <option value="">ทั้งหมด</option>
+            <option>รอ PC ยืนยัน</option>
+            <option>รออนุมัติ</option>
+            <option>รอหัวหน้าอนุมัติเกินงบ</option>
+            <option>อนุมัติ</option>
+            <option>ออก PR/PO แล้ว</option>
+            <option>รับของแล้ว</option>
+            <option>ไม่อนุมัติ</option>
+            <option>PC ปฏิเสธ</option>
+            <option>ยกเลิก</option>
           </select>
           <button id="btnReloadReq" class="btn sm ghost">โหลดใหม่</button>
           <span id="reqInfo" class="hint"></span>
         </div>
+        <div id="reqDash" class="dash"></div>
         <div id="reqList"></div>
       </div>
 
@@ -178,8 +195,16 @@
             <input id="budgetFile" type="file" accept=".xlsx,.xls" hidden>
             <p class="hint">ไฟล์ "Budget STT 2026 - Revise-Budget" · นำเข้าใหม่จะแทนที่ของเดิมทั้งหมด ·
               งบต่อเดือน = Revise Budget (ถ้ามี) ไม่งั้นใช้ Budget · คงเหลือ = งบ − Actual − คำขอที่รออนุมัติ/อนุมัติแล้ว</p>
+            <h3 style="margin-top:16px">เตือนอัตโนมัติ</h3>
+            <p class="hint">ส่งอีเมลเตือน PC ที่ยังไม่ยืนยันเกิน 3 วัน ทุกวัน 09:00</p>
+            <button id="btnTrigger" class="btn sm ghost">เปิดการเตือนอัตโนมัติ</button>
           </section>
         </div>
+        <section style="margin-top:18px">
+          <h3>Master PC — ผู้รับผิดชอบยืนยันรายการ และหัวหน้าอนุมัติเกินงบ</h3>
+          <p class="hint">แถวที่ไฮไลต์ = ยังไม่มีอีเมลผู้รับผิดชอบ (ระบบจะสร้างคำขอให้แต่ยังส่งอีเมลไม่ได้) · แก้ในชีต master_pc ได้เช่นกัน</p>
+          <div class="table-wrap" style="max-height:none"><table id="tblMasterPc" class="grid"></table></div>
+        </section>
       </div>
 
       <div id="tab-ai" class="tabpane" hidden>
