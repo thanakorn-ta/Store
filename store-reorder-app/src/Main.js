@@ -6,6 +6,7 @@
  */
 
 function runWeeklyPipeline() {
+  ownerOnly_();
   importAllFiles();
   recomputeMinMax();
   buildReorderQueue();
@@ -14,6 +15,7 @@ function runWeeklyPipeline() {
 }
 
 function installWeeklyTrigger() {
+  ownerOnly_();
   ScriptApp.getProjectTriggers().forEach(function (t) {
     if (t.getHandlerFunction() === 'runWeeklyPipeline' || t.getHandlerFunction() === 'remindUnansweredReorders') {
       ScriptApp.deleteTrigger(t);

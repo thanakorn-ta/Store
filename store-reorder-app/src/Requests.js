@@ -394,6 +394,7 @@ function markReceived(id, note) {
 
 /** Re-sends the confirm email for requests still waiting on the PC after REMINDER_AFTER_DAYS. */
 function remindPendingConfirmations() {
+  ownerOnly_();
   var ss = db_();
   var days = CONFIG.REMINDER_AFTER_DAYS || 3;
   var cutoff = Date.now() - days * 86400000;
@@ -564,7 +565,7 @@ function appLink_(id, label) {
 }
 
 function mailPeople_(to, subject, html) {
-  to = uniq_((to || []).map(function (e) { return String(e).toLowerCase(); }));
+  to = uniq_((to || []).map(function (e) { return String(e).toLowerCase(); }).filter(function (e) { return /@/.test(e); }));
   if (!to.length) return;
   MailApp.sendEmail({ to: to.join(','), subject: subject, htmlBody: html });
 }

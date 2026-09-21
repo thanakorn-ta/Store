@@ -40,10 +40,32 @@ function save() {
 
 // ------------------------------------------------------------ helpers
 
-// Running inside an Apps Script HtmlService page?
+// Server = the Apps Script project (src/). Reached two ways:
+//   - page served by Apps Script itself  -> google.script.run.api(...)
+//   - page on GitHub Pages / Vercel       -> HTTPS POST to the Web App URL (doPost in src/Api.js)
 const GAS = typeof google !== 'undefined' && !!(google.script && google.script.run);
-const gasCall = (fn, ...args) => new Promise((resolve, reject) =>
-  google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[fn](...args));
+const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycby9p8MjJMZIeOufAyn3C6G9j4W3Q5iJZlgOrzfgt0vSOZTBCzyDjuI8a0GaXQZQlW4D/exec';
+const SERVER = GAS || !!APPS_SCRIPT_URL;
+const TOKEN_KEY = 'store-reorder-ai:token';
+let token = (() => { try { return localStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; } })();
+const setToken = t => { token = t || ''; try { t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY); } catch { /* private mode */ } };
+
+function rawCall(fn, args) {
+  if (GAS) {
+    return new Promise((resolve, reject) =>
+      google.script.run.withSuccessHandler(resolve).withFailureHandler(reject).api(token, fn, args));
+  }
+  // text/plain keeps this a "simple" request (no CORS preflight, which Apps Script can't answer)
+  return fetch(APPS_SCRIPT_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({ token, fn, args }) })
+    .then(r => { if (!r.ok) throw new Error('เชื่อมต่อ server ไม่ได้ (' + r.status + ')'); return r.json(); })
+    .then(j => { if (!j.ok) throw new Error(j.error); return j.result; });
+}
+
+const gasCall = (fn, ...args) => rawCall(fn, args).catch(e => {
+  if (/SESSION_EXPIRED/.test(e && e.message)) { setToken(''); applySession(null); throw new Error('หมดเวลาเข้าสู่ระบบ กรุณาเข้าสู่ระบบใหม่'); }
+  throw e;
+});
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -147,7 +169,7 @@ async function removeFile(type, name) {
 
 const SHARED_SLOTS = ['minmax', 'usage', 'balance', 'reorder'];
 let sharedLoaded = false;
-const isShared = type => GAS && SHARED_SLOTS.includes(type);
+const isShared = type => SERVER && SHARED_SLOTS.includes(type);
 const canEditSlot = type => !isShared(type) || isAdmin();
 
 function applyServerData(data) {
@@ -175,7 +197,7 @@ $('#btnReloadData').addEventListener('click', () => loadServerData(true));
 // ------------------------------------------------------------ slots UI
 
 function renderSlots() {
-  if (GAS) {
+  if (SERVER) {
     $('#filesHint').textContent = isAdmin()
       ? 'ข้อมูลกลางเก็บใน Google Sheet — ทุกคนเห็นชุดเดียวกัน · เพิ่ม/เปลี่ยน/นำไฟล์ออกได้ตลอด · แก้รายแถวได้ในชีต data_* แล้วกด "โหลดข้อมูลใหม่" · ช่อง ± เป็นของเครื่องนี้เท่านั้น'
       : 'ข้อมูลกลางจาก Google Sheet (Admin เป็นผู้อัปเดต) · ช่อง ± ใส่ไฟล์รอบก่อนเพื่อเทียบได้เอง (เก็บในเครื่องนี้)';
@@ -330,7 +352,7 @@ function renderActive() {
   else if (activeTab === 'merged') renderMerged();
   else if (activeTab === 'cart') { renderCart(); renderSubmitBox(); }
   else if (activeTab === 'requests') loadRequests();
-  else if (activeTab === 'admin') renderAdmin();
+  else if (activeTab === 'admin') { members = null; renderAdmin(); } // always fresh: sign-ups arrive any time
 }
 
 // ------------------------------------------------------------ compare table
@@ -580,7 +602,7 @@ $('#btnReset').addEventListener('click', () => {
 
 // ------------------------------------------------------------ AI assistant
 
-$('.ai-key').hidden = GAS; // Apps Script uses ANTHROPIC_API_KEY from Script Properties
+$('.ai-key').hidden = SERVER; // Apps Script uses ANTHROPIC_API_KEY from Script Properties
 try { $('#aiKey').value = localStorage.getItem(AI_KEY) || ''; } catch { /* ignore */ }
 $('#aiKey').addEventListener('change', e => { try { localStorage.setItem(AI_KEY, e.target.value.trim()); } catch { /* ignore */ } });
 $('#aiKeyClear').addEventListener('click', () => { $('#aiKey').value = ''; try { localStorage.removeItem(AI_KEY); } catch { /* ignore */ } });
@@ -629,14 +651,14 @@ async function askClaudeBrowser(key, userContent) {
 async function askAI() {
   const key = $('#aiKey').value.trim();
   const q = $('#aiQ').value.trim();
-  if (!GAS && !key) return toast('ใส่ Anthropic API key ก่อน');
+  if (!SERVER && !key) return toast('ใส่ Anthropic API key ก่อน');
   if (!q) return toast('พิมพ์คำถามก่อน');
   if (!merged.rows.length) return toast('ยังไม่มีข้อมูล');
   $('#aiAsk').disabled = true; $('#aiStatus').textContent = 'กำลังวิเคราะห์…'; $('#aiOut').textContent = '';
   const userContent = `ข้อมูลรอบนี้:\n${aiContext()}\n\nคำถาม: ${q}`;
   try {
     // Apps Script: key lives in Script Properties, request goes out via UrlFetchApp (src/Ui.js)
-    $('#aiOut').textContent = GAS
+    $('#aiOut').textContent = SERVER
       ? await gasCall('askClaudeFromUi', AI_SYSTEM, userContent)
       : await askClaudeBrowser(key, userContent);
     $('#aiStatus').textContent = '';
@@ -648,83 +670,143 @@ async function askAI() {
   }
 }
 
-// ------------------------------------------------------------ membership (Apps Script only; server: src/Members.js)
+// ------------------------------------------------------------ membership: ID + password (server: src/Members.js, src/Api.js)
 
-let me = null;          // { email, name, role, status } from getSessionInfo()
+let me = null;          // { id, name, email, role, status, mustChange } from getSessionInfo()/login()
 let budgetOpts = null;  // { year, lines:[{key,label,months:{m:{plan,actual}}}], reserved:{"key|m":amt} }
 let requests = [];
 
-const isMember = () => !!me && me.status === 'active';
+const isMember = () => !!me && me.status === 'active' && !me.mustChange;
 const isAdmin = () => isMember() && me.role === 'admin';
-const errMsg = e => (e && e.message) || String(e);
+const errMsg = e => String((e && e.message) || e).replace(/^Error:\s*/, '').replace(/^SESSION_EXPIRED:\s*/, '');
 
 function applySession(info) {
-  me = info;
+  // identity used to match Master PC owners / managers: email when set, else the ID (same rule as the server)
+  me = info && info.id ? { ...info, email: String(info.email || info.id).toLowerCase() } : info;
+  members = null; masterPc = []; requests = []; // never show the previous user's data
   const active = isMember();
-  $('#whoami').hidden = !me || !me.email;
-  if (me && me.email) {
-    $('#whoami').innerHTML = `<b>${esc(me.name || me.email)}</b> · ${active ? (me.role === 'admin' ? 'Admin' : 'User') : esc(me.email)}`;
+  $('#whoami').hidden = !active;
+  if (active) {
+    $('#whoami').innerHTML = `<b>${esc(me.name || me.id)}</b> · ${me.role === 'admin' ? 'Admin' : 'User'} (${esc(me.id)})
+      <button class="link-btn" data-acct="profile">บัญชีของฉัน</button> <button class="link-btn" data-acct="logout">ออกจากระบบ</button>`;
   }
   $('#tabRequests').hidden = !active;
   $('#tabAdmin').hidden = !isAdmin();
+  $('#roundBox').hidden = !isAdmin();
   renderGate();
-  const blocked = GAS && !active;
+  const blocked = SERVER && !active;
   $('#filesPanel').hidden = blocked;
-  if (blocked) { $('#summary').hidden = true; $('#work').hidden = true; } else recompute();
+  $('.top-actions').querySelectorAll('.btn').forEach(b => { b.hidden = blocked; });
+  if (blocked) { $('#summary').hidden = true; $('#work').hidden = true; return; }
+  recompute();
   if (active) {
     loadServerData(); refreshBudget(); loadMasterPc();
     loadRequests(true).then(openDeepLink);
   }
-  $('#roundBox').hidden = !isAdmin();
 }
 
-// Links in emails are <exec url>?req=REQ-…; Apps Script exposes the outer URL's params this way
+// Links in emails are <url>?req=REQ-…
 function openDeepLink() {
-  if (!GAS || !google.script.url) return;
-  google.script.url.getLocation(loc => {
-    const id = loc && loc.parameter && loc.parameter.req;
+  const go = id => {
     if (!id) return;
     $('#reqFilter').value = '';
     focusReq = id;
     document.querySelector('.tab[data-tab="requests"]').click();
-  });
+  };
+  if (GAS && google.script.url) google.script.url.getLocation(loc => go(loc && loc.parameter && loc.parameter.req));
+  else go(new URLSearchParams(location.search).get('req'));
 }
-
-// Static host (GitHub Pages / Vercel): no server, so point people at the full system
-const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycby9p8MjJMZIeOufAyn3C6G9j4W3Q5iJZlgOrzfgt0vSOZTBCzyDjuI8a0GaXQZQlW4D/exec';
 
 function renderGate() {
   const g = $('#gate');
-  if (!GAS) {
-    g.hidden = false;
-    g.innerHTML = `<div class="gate wide"><h2>เวอร์ชันออฟไลน์ (เก็บข้อมูลในเครื่องนี้เท่านั้น)</h2>
-      <p class="hint">บันทึกข้อมูลถาวรให้ทุกคนเห็น · ส่งอีเมล · ระบบสมาชิก · ส่งคำขอตาม workflow (PC ยืนยัน → ตรวจงบ → PR/PO → รับของ)
-      ใช้ได้ที่ระบบเต็มบน Google Apps Script (login ด้วยบัญชีบริษัท)</p>
-      <p><a class="btn" href="${APPS_SCRIPT_URL}" target="_top">เปิดระบบเต็ม</a></p></div>`;
+  if (!SERVER || isMember()) { g.hidden = true; return; }
+  g.hidden = false;
+  if (me && me.status === 'loading') { g.innerHTML = '<div class="gate"><p class="hint">กำลังตรวจสอบการเข้าสู่ระบบ…</p></div>'; return; }
+
+  if (me && me.mustChange) {
+    g.innerHTML = `<div class="gate"><h2>ตั้งรหัสผ่านใหม่</h2>
+      <p class="hint">${esc(me.id)} ใช้รหัสผ่านเริ่มต้นอยู่ — ตั้งรหัสใหม่ (อย่างน้อย 8 ตัวอักษร) ก่อนใช้งาน</p>
+      <form id="pwForm" class="gate-form">
+        <input name="old" type="password" placeholder="รหัสผ่านปัจจุบัน" autocomplete="current-password" required>
+        <input name="pw1" type="password" placeholder="รหัสผ่านใหม่" autocomplete="new-password" minlength="8" required>
+        <input name="pw2" type="password" placeholder="ยืนยันรหัสผ่านใหม่" autocomplete="new-password" minlength="8" required>
+        <button class="btn">บันทึกรหัสผ่าน</button> <button type="button" class="btn ghost" data-acct="logout">ออกจากระบบ</button>
+      </form></div>`;
+    $('#pwForm').addEventListener('submit', async e => {
+      e.preventDefault();
+      const f = e.target;
+      if (f.pw1.value !== f.pw2.value) return toast('รหัสผ่านใหม่ไม่ตรงกัน');
+      try { applySession(await gasCall('changePassword', f.old.value, f.pw1.value)); toast('เปลี่ยนรหัสผ่านแล้ว'); }
+      catch (err) { toast(errMsg(err)); }
+    });
     return;
   }
-  if (isMember()) { g.hidden = true; return; }
-  g.hidden = false;
-  const st = me ? me.status : 'loading';
-  if (st === 'loading') { g.innerHTML = '<div class="gate"><p class="hint">กำลังตรวจสอบสิทธิ์…</p></div>'; return; }
-  if (st === 'pending') {
-    g.innerHTML = `<div class="gate"><h2>รอ Admin อนุมัติ</h2><p class="hint">ส่งคำขอเข้าใช้งานของ ${esc(me.email)} แล้ว — Admin จะได้รับอีเมลแจ้ง เมื่ออนุมัติแล้วเปิดหน้านี้ใหม่ได้เลย</p></div>`;
-  } else if (st === 'disabled') {
-    g.innerHTML = `<div class="gate"><h2>บัญชีถูกระงับ</h2><p class="hint">${esc(me.email)} ถูกระงับการใช้งาน ติดต่อ Admin</p></div>`;
-  } else if (st === 'error') {
-    g.innerHTML = `<div class="gate"><h2>เข้าระบบไม่ได้</h2><p class="hint">${esc(me.error)}</p></div>`;
-  } else {
-    g.innerHTML = `<div class="gate"><h2>ขอเข้าใช้งาน</h2>
-      <p class="hint">${esc(me.email)} ยังไม่ได้เป็นสมาชิก กรอกชื่อแล้วส่งคำขอ Admin จะอนุมัติให้</p>
-      <form id="accessForm"><input name="name" placeholder="ชื่อ-นามสกุล / ทีม" required><button class="btn">ส่งคำขอเข้าใช้งาน</button></form></div>`;
-    $('#accessForm').addEventListener('submit', async e => {
-      e.preventDefault();
-      e.submitter && (e.submitter.disabled = true);
-      try { applySession(await gasCall('requestAccess', e.target.name.value)); }
-      catch (err) { toast('ส่งไม่สำเร็จ: ' + errMsg(err)); e.submitter && (e.submitter.disabled = false); }
-    });
-  }
+
+  const registering = g.dataset.mode === 'register';
+  g.innerHTML = registering
+    ? `<div class="gate"><h2>สมัครสมาชิก</h2>
+        <p class="hint">สมัครแล้วรอ Admin อนุมัติ · อีเมลใช้รับแจ้งเตือนและจับคู่ผู้รับผิดชอบ PC</p>
+        <form id="regForm" class="gate-form">
+          <input name="username" placeholder="ID (a-z 0-9 . _ -)" autocomplete="username" required>
+          <input name="password" type="password" placeholder="รหัสผ่าน (อย่างน้อย 8 ตัว)" autocomplete="new-password" minlength="8" required>
+          <input name="name" placeholder="ชื่อ-นามสกุล / ทีม" required>
+          <input name="email" type="email" placeholder="อีเมล @planbmedia.co.th">
+          <button class="btn">สมัคร</button> <button type="button" class="btn ghost" data-gate="login">มีบัญชีแล้ว — เข้าสู่ระบบ</button>
+        </form></div>`
+    : `<div class="gate"><h2>เข้าสู่ระบบ</h2>
+        <form id="loginForm" class="gate-form">
+          <input name="username" placeholder="ID" autocomplete="username" required autofocus>
+          <input name="password" type="password" placeholder="รหัสผ่าน" autocomplete="current-password" required>
+          <button class="btn">เข้าสู่ระบบ</button> <button type="button" class="btn ghost" data-gate="register">สมัครสมาชิก</button>
+        </form>
+        <p id="gateErr" class="hint over"></p></div>`;
+  const f = $('#loginForm') || $('#regForm');
+  f.addEventListener('submit', async e => {
+    e.preventDefault();
+    const btn = f.querySelector('button.btn:not(.ghost)');
+    btn.disabled = true;
+    try {
+      if (registering) {
+        toast(await gasCall('register', { username: f.username.value, password: f.password.value, name: f.name.value, email: f.email.value }));
+        g.dataset.mode = 'login'; renderGate();
+      } else {
+        const res = await gasCall('login', f.username.value, f.password.value);
+        setToken(res.token);
+        applySession(res.user);
+      }
+    } catch (err) {
+      const msg = errMsg(err);
+      if ($('#gateErr')) $('#gateErr').textContent = msg + (/เชื่อมต่อ|fetch/i.test(msg) ? ' — ตรวจว่า Deploy Apps Script เวอร์ชันล่าสุดแล้ว และตั้งผู้มีสิทธิ์เข้าถึงเป็น "ทุกคน"' : '');
+      else toast(msg);
+      btn.disabled = false;
+    }
+  });
 }
+
+document.addEventListener('click', async e => {
+  const gateBtn = e.target.closest('[data-gate]');
+  if (gateBtn) { $('#gate').dataset.mode = gateBtn.dataset.gate; renderGate(); return; }
+  const acct = e.target.closest('[data-acct]');
+  if (!acct) return;
+  if (acct.dataset.acct === 'logout') {
+    try { await gasCall('logout'); } catch { /* token may already be gone */ }
+    setToken(''); $('#gate').dataset.mode = 'login'; applySession(null);
+  } else if (acct.dataset.acct === 'profile') {
+    const email = prompt('อีเมลของคุณ (ใช้รับแจ้งเตือน / จับคู่ผู้รับผิดชอบ PC):', me.id === me.email ? '' : me.email);
+    if (email === null) return;
+    const change = confirm('ต้องการเปลี่ยนรหัสผ่านด้วยหรือไม่?');
+    try {
+      await gasCall('updateProfile', { name: me.name, email });
+      if (change) {
+        const old = prompt('รหัสผ่านปัจจุบัน:'); if (old === null) return;
+        const pw = prompt('รหัสผ่านใหม่ (อย่างน้อย 8 ตัว):'); if (!pw) return;
+        await gasCall('changePassword', old, pw);
+      }
+      applySession(await gasCall('getSessionInfo'));
+      toast('บันทึกแล้ว');
+    } catch (err) { toast(errMsg(err)); }
+  }
+});
 
 // ------------------------------------------------------------ budget (select line + month, show balance)
 
@@ -745,7 +827,7 @@ function budgetAvail(line, m) {
 
 function renderSubmitBox() {
   const hint = $('#submitHint'), form = $('#submitForm');
-  if (!GAS) {
+  if (!SERVER) {
     hint.textContent = 'ส่งคำขอให้ Admin ได้เฉพาะในเวอร์ชัน Apps Script (เข้าด้วยบัญชี Google ของบริษัท) — เวอร์ชันนี้ใช้ส่งออก .xlsx แทน';
     form.hidden = true; return;
   }
@@ -833,7 +915,7 @@ $('#btnSubmitReq').addEventListener('click', async () => {
 
 // Admin: budget upload (Admin tab button, or drop the budget file anywhere)
 async function uploadBudget(rows, fileName) {
-  if (!GAS) return `✗ ${fileName}: นำเข้า Budget ได้เฉพาะในเวอร์ชัน Apps Script`;
+  if (!SERVER) return `✗ ${fileName}: นำเข้า Budget ได้เฉพาะในเวอร์ชัน Apps Script`;
   if (!isAdmin()) return `✗ ${fileName}: เฉพาะ Admin นำเข้าไฟล์ Budget ได้`;
   const lines = parseBudget(rows);
   if (!lines.length) return `✗ ${fileName}: ไม่พบรายการ Budget`;
@@ -1189,14 +1271,16 @@ async function renderAdmin() {
     try { members = await gasCall('listMembers'); } catch (e) { toast(errMsg(e)); return; }
   }
   const order = { pending: 0, active: 1, disabled: 2 };
-  const list = [...members].sort((a, b) => order[a.status] - order[b.status] || a.email.localeCompare(b.email));
-  $('#tblMembers').innerHTML = `<thead><tr><th>อีเมล</th><th>ชื่อ</th><th>สิทธิ์</th><th>สถานะ</th><th></th></tr></thead>
-    <tbody>${list.map(m => `<tr data-email="${esc(m.email)}" class="${m.status === 'pending' ? 'sel' : ''}">
-      <td class="sku">${esc(m.email)}</td>
+  const list = [...members].sort((a, b) => order[a.status] - order[b.status] || a.username.localeCompare(b.username));
+  $('#tblMembers').innerHTML = `<thead><tr><th>ID</th><th>ชื่อ</th><th>อีเมล</th><th>สิทธิ์</th><th>สถานะ</th><th></th></tr></thead>
+    <tbody>${list.map(m => `<tr data-user="${esc(m.username)}" class="${m.status === 'pending' ? 'sel' : ''}">
+      <td class="sku">${esc(m.username)}${m.mustChange ? '<div class="pc">รอเปลี่ยนรหัส</div>' : ''}</td>
       <td><input data-f="name" value="${esc(m.name)}"></td>
+      <td><input data-f="email" type="email" value="${esc(m.email)}" placeholder="ใช้รับแจ้งเตือน"></td>
       <td><select data-f="role"><option value="user" ${m.role === 'user' ? 'selected' : ''}>User</option><option value="admin" ${m.role === 'admin' ? 'selected' : ''}>Admin</option></select></td>
       <td><select data-f="status">${['pending', 'active', 'disabled'].map(s => `<option value="${s}" ${m.status === s ? 'selected' : ''}>${{ pending: 'รออนุมัติ', active: 'ใช้งาน', disabled: 'ระงับ' }[s]}</option>`).join('')}</select></td>
-      <td>${m.status === 'pending' ? '<button class="btn sm" data-save="approve">อนุมัติ</button> ' : ''}<button class="btn sm ghost" data-save="1">บันทึก</button></td>
+      <td class="nowrap">${m.status === 'pending' ? '<button class="btn sm" data-save="approve">อนุมัติ</button> ' : ''}<button class="btn sm ghost" data-save="1">บันทึก</button>
+        <button class="btn sm ghost" data-save="reset">ตั้งรหัสใหม่</button></td>
     </tr>`).join('')}</tbody>`;
 }
 
@@ -1205,31 +1289,41 @@ $('#tblMembers').addEventListener('click', async e => {
   if (!btn) return;
   const tr = btn.closest('tr');
   const val = f => tr.querySelector(`[data-f="${f}"]`).value;
+  const input = { username: tr.dataset.user, name: val('name'), email: val('email'), role: val('role'),
+    status: btn.dataset.save === 'approve' ? 'active' : val('status') };
+  if (btn.dataset.save === 'reset') {
+    const pw = prompt(`ตั้งรหัสผ่านชั่วคราวให้ ${tr.dataset.user} (อย่างน้อย 8 ตัว — ผู้ใช้จะถูกบังคับเปลี่ยนตอนเข้าสู่ระบบ):`);
+    if (!pw) return;
+    input.password = pw;
+  }
   btn.disabled = true;
   try {
-    members = await gasCall('saveMember', { email: tr.dataset.email, name: val('name'), role: val('role'),
-      status: btn.dataset.save === 'approve' ? 'active' : val('status') });
-    toast('บันทึกแล้ว'); renderAdmin();
+    members = await gasCall('saveMember', input);
+    toast(btn.dataset.save === 'reset' ? 'ตั้งรหัสผ่านใหม่แล้ว — แจ้งผู้ใช้ให้เข้าสู่ระบบแล้วเปลี่ยนรหัส' : 'บันทึกแล้ว');
+    renderAdmin();
   } catch (err) { toast('บันทึกไม่สำเร็จ: ' + errMsg(err)); btn.disabled = false; }
 });
 $('#memberAdd').addEventListener('submit', async e => {
   e.preventDefault();
   const f = e.target;
   try {
-    members = await gasCall('saveMember', { email: f.email.value, name: f.name.value, role: f.role.value, status: 'active' });
-    f.reset(); toast('เพิ่มสมาชิกแล้ว'); renderAdmin();
+    members = await gasCall('saveMember', { username: f.username.value, password: f.password.value, name: f.name.value,
+      email: f.email.value, role: f.role.value, status: 'active' });
+    f.reset(); toast('เพิ่มสมาชิกแล้ว — ผู้ใช้จะถูกบังคับเปลี่ยนรหัสผ่านตอนเข้าสู่ระบบครั้งแรก'); renderAdmin();
   } catch (err) { toast('เพิ่มไม่สำเร็จ: ' + errMsg(err)); }
 });
 
 // ------------------------------------------------------------ boot
 
 // Apps Script: never show a stale per-browser copy of the shared slots — wait for the server's
-if (GAS) for (const t of SHARED_SLOTS) state.files[t] = [];
+if (SERVER) for (const t of SHARED_SLOTS) state.files[t] = [];
 recompute();
-if (GAS) {
-  applySession({ status: 'loading' });
-  gasCall('getSessionInfo').then(applySession, e => applySession({ status: 'error', error: errMsg(e) }));
-} else {
-  renderGate(); // offline banner pointing to the full Apps Script system
+if (SERVER) {
+  if (token) {
+    applySession({ status: 'loading' });
+    gasCall('getSessionInfo').then(applySession, () => { setToken(''); applySession(null); });
+  } else {
+    applySession(null); // shows the sign-in form
+  }
 }
 })();

@@ -1,26 +1,16 @@
 /**
  * WebApp.js
- * Confirmation page (step 6 in the workflow): a PC owner opens their emailed
- * link, sees the suggested quantities, can edit/confirm/reject per line, and
- * submits. Deploy via `clasp deploy` (or the Apps Script editor) as a Web App
- * with access "Anyone within domain" (see appsscript.json).
+ * doGet serves the web UI (Ui.js) for every URL, including links from emails
+ * (?req=REQ-...). Sign-in happens inside the page (Members.js / Api.js).
+ *
+ * The older per-PC confirm page (confirm.html + submitConfirmation, fed by
+ * Notify.js/reorder_queue) is superseded by the request workflow in
+ * Requests.js; submitConfirmation is kept for the legacy pipeline and can
+ * only run from the editor/trigger.
  */
 
 function doGet(e) {
-  // Emailed confirm links carry ?pc=...&skus=...; anything else is the main UI (Ui.js)
-  if (!e.parameter.pc) return renderReorderUi_();
-
-  var pcCode = e.parameter.pc || '';
-  var skus = (e.parameter.skus || '').split(',').filter(String);
-
-  var ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
-  var queue = readSheetAsObjects_(ss, CONFIG.SHEETS.REORDER_QUEUE);
-  var items = queue.filter(function (r) { return r.pc_code === pcCode && skus.indexOf(r.sku) !== -1; });
-
-  var template = HtmlService.createTemplateFromFile('confirm');
-  template.pcCode = pcCode;
-  template.items = items;
-  return template.evaluate().setTitle('ยืนยันรายการสั่งซื้อ');
+  return renderReorderUi_();
 }
 
 /**
@@ -28,6 +18,7 @@ function doGet(e) {
  * payload: [{ sku, confirmedQty, note }, ...]
  */
 function submitConfirmation(pcCode, payload) {
+  ownerOnly_();
   var ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   var sheet = ss.getSheetByName(CONFIG.SHEETS.REORDER_QUEUE);
   var data = sheet.getDataRange().getValues();

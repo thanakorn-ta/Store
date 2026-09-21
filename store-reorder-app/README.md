@@ -5,10 +5,10 @@
 | | GitHub Pages | Apps Script Web App |
 |---|---|---|
 | ลิงก์ | `https://<user>.github.io/store-reorder-app/` | `https://script.google.com/.../exec` |
-| ใครเข้าได้ | ตามสิทธิ์ repo/Pages | คนในโดเมน planbmedia (ตาม `appsscript.json`) |
+| ใครเข้าได้ | สมาชิกที่เข้าสู่ระบบ (ID/รหัสผ่าน) | สมาชิกที่เข้าสู่ระบบ (ID/รหัสผ่าน) |
 | ผู้ช่วย AI | ผู้ใช้ใส่ API key เอง (เก็บในเบราว์เซอร์) | ใช้ `ANTHROPIC_API_KEY` ใน Script Properties — ผู้ใช้ไม่เห็น key |
-| ข้อมูล 4 ช่อง | เก็บในเบราว์เซอร์ของแต่ละคน | **ข้อมูลกลางใน Google Sheet** — ทุกคนเห็นชุดเดียวกัน Admin แก้ได้ |
-| สั่งซื้อ | ส่งออก .xlsx | ส่งออก .xlsx **+ ส่งคำขอให้ Admin** (เลือก Budget + เดือน, ระบบสมาชิก) |
+| ข้อมูล 4 ช่อง | **ข้อมูลกลางใน Google Sheet** (เรียก Apps Script ผ่าน `doPost`) | **ข้อมูลกลางใน Google Sheet** |
+| สมาชิก / อีเมล / workflow | ✓ (backend = Apps Script) | ✓ |
 | deploy | `.github/workflows/pages.yml` | `.github/workflows/appsscript.yml` (clasp push) |
 
 แก้โค้ดหน้าเว็บที่ `web/` เท่านั้น แล้วรัน `npm run build` (หรือ
@@ -45,7 +45,7 @@
 > ถ้าใช้แพลนฟรีต้องเป็น repo public — ในโค้ดไม่มีข้อมูลสินค้าจริง (ไฟล์ .xls/.xlsx ถูก .gitignore ไว้)
 > แต่ควรย้าย `docs/budget_mapping_draft.md` ออกก่อนถ้าจะเปิด public
 
-### ข้อมูลกลาง (เฉพาะเวอร์ชัน Apps Script)
+### ข้อมูลกลาง (ทั้งลิงก์ Apps Script และ GitHub/Vercel)
 
 ข้อมูล 4 ช่อง (MIN/MAX, การใช้ของ, คงเหลือ, จุดสั่งซื้อ) เก็บใน Google Sheet ฐานข้อมูล — ทุกคนเปิดมาเห็นชุดเดียวกัน
 
@@ -53,18 +53,24 @@
 - แก้รายแถวได้โดยตรงในชีต `data_minmax`, `data_usage`, `data_balance`, `data_reorder`
   (คอลัมน์ A = ไฟล์ที่มา) แล้วกด "โหลดข้อมูลใหม่" ในแอป · ประวัติการอัปโหลดอยู่ในชีต `data_files`
 - User: ดูอย่างเดียว · ช่อง ± (ไฟล์รอบก่อน) ยังเป็นของแต่ละเครื่อง
-- เวอร์ชัน GitHub Pages/Vercel ไม่มี server จึงยังเก็บข้อมูลในเบราว์เซอร์ของแต่ละคนเหมือนเดิม
-  (ไม่ได้ฝังข้อมูลสต๊อก/ราคาไว้ในเว็บสาธารณะ)
 
-### ระบบสมาชิก + คำขอสั่งซื้อ (เฉพาะเวอร์ชัน Apps Script)
+### ระบบสมาชิก (ID + รหัสผ่าน) + คำขอสั่งซื้อ
 
-ยืนยันตัวตนด้วยบัญชี Google ของบริษัท (ไม่มีรหัสผ่านแยก) — **ต้อง Deploy แบบ
-"Execute as: Me" + "Who has access: Anyone within planbmedia.co.th"** ถ้าตั้งเป็น "Anyone"
-ระบบจะอ่านอีเมลผู้ใช้ไม่ได้และเข้าใช้งานไม่ได้
+เข้าสู่ระบบด้วย ID/รหัสผ่านของระบบเอง — ใช้ได้ทั้งลิงก์ Apps Script และหน้า GitHub/Vercel
+(หน้า GitHub/Vercel เรียก Apps Script เป็น backend ผ่าน `doPost` ใน `src/Api.js`, ตั้ง URL ที่
+`APPS_SCRIPT_URL` ใน `web/app.js`) — **Deploy: Execute as: Me · Who has access: Anyone**
+
+- **Admin เริ่มต้น: ID `admin` / รหัส `admin2026`** (`CONFIG.DEFAULT_ADMIN`) สร้างอัตโนมัติเมื่อยังไม่มี Admin —
+  เข้าครั้งแรกระบบบังคับตั้งรหัสใหม่ · ⚠ รหัสเริ่มต้นนี้อยู่ในโค้ด/GitHub จึงต้องเปลี่ยนทันที
+- รหัสผ่านเก็บแบบ salt + hash ในชีต `members` (ไม่เก็บตัวจริง) · ผิด 5 ครั้งล็อก 10 นาที · เข้าระบบค้างไว้ 6 ชม. (ต่ออายุเมื่อใช้งาน)
+- Admin เพิ่มสมาชิก (ตั้งรหัสเริ่มต้น → ผู้ใช้ต้องเปลี่ยนตอนเข้าครั้งแรก) / ตั้งรหัสใหม่ / เปลี่ยนสิทธิ์ / ระงับ
+- ทุกฟังก์ชันที่หน้าเว็บเรียกต้องผ่าน `api()` ที่ตรวจ token · ฟังก์ชันชุดเก่า (import/weekly pipeline/trigger)
+  รันได้จาก editor/trigger เท่านั้น (`ownerOnly_`)
+- ใส่ **อีเมล** ให้สมาชิกทุกคน — ใช้ส่งแจ้งเตือน และจับคู่กับผู้รับผิดชอบ/หัวหน้าใน Master PC
 
 | บทบาท | ทำอะไรได้ |
 |---|---|
-| ผู้ใช้ใหม่ | เปิดลิงก์ → กรอกชื่อ "ขอเข้าใช้งาน" → Admin ได้อีเมล |
+| ผู้ใช้ใหม่ | "สมัครสมาชิก" (ID, รหัสผ่าน, ชื่อ, อีเมล) → รอ Admin อนุมัติ (Admin ได้อีเมล) |
 | User | เทียบยอด/เลือกรายการ+จำนวน → **เลือก Budget + เดือนที่จะใช้ของ** → ส่งคำขอให้ Admin · ดู/ยกเลิกคำขอของตัวเอง |
 | Admin | ทุกอย่างของ User + อนุมัติ/ไม่อนุมัติคำขอ (แจ้งผู้ขอทางอีเมล) · จัดการสมาชิก (อนุมัติ/เปลี่ยนสิทธิ์/ระงับ) · นำเข้าไฟล์ Budget · Master PC |
 
@@ -83,7 +89,7 @@
 ทุกขั้นแจ้งอีเมลผู้เกี่ยวข้อง และบันทึกใน `activity_log` · แท็บคำขอมีตัวกรอง "รอฉันดำเนินการ" และสรุปจำนวน/มูลค่าตามสถานะ ·
 User ยังส่งคำขอเองจากตะกร้าได้ (เข้าที่ขั้น 7 ทันที)
 
-- Admin ตั้งต้น: `CONFIG.ADMIN_EMAILS` ใน `src/Config.js` (เข้าครั้งแรกได้สิทธิ์ Admin อัตโนมัติ)
+- `CONFIG.ADMIN_EMAILS[0]` = อีเมลของ Admin เริ่มต้น (รับแจ้งเตือน)
 - Budget: Admin นำเข้าไฟล์ "Budget STT 2026 - Revise-Budget" ที่แท็บ Admin (หรือลากไฟล์มาวาง) —
   รวมเป็น Budget ต่อ บริษัท × Media Location × GL Code × เดือน · ถ้าช่อง Media Location ว่าง
   ใช้ชื่อจากคอลัมน์ Calculation · แถวที่ไม่มี GL Code/เลขเดือนจะถูกข้ามและแจ้งจำนวน
@@ -107,8 +113,8 @@ User ยังส่งคำขอเองจากตะกร้าได้
 1. ทำ Setup ข้อ 1–3 ด้านล่าง (clasp login, สร้างโปรเจกต์, กรอก `SPREADSHEET_ID`)
 2. Script Properties: เพิ่ม `ANTHROPIC_API_KEY` ถ้าจะใช้แท็บผู้ช่วย AI
 3. `npm run push` (build + clasp push) แล้ว Deploy > New deployment > Web app
-   (Execute as: Me, Who has access: Anyone within planbmedia) — ได้ลิงก์ `/exec`
-4. ลิงก์ `/exec` เปล่าๆ = หน้าเทียบยอดสั่งซื้อ · ลิงก์ที่มี `?pc=...` (จากอีเมล) = หน้ายืนยันเดิม
+   (Execute as: Me, Who has access: Anyone) — ได้ลิงก์ `/exec`
+4. ลิงก์ `/exec` = หน้าเว็บเต็ม (ลิงก์ในอีเมล `?req=...` เปิดคำขอนั้นให้เลย)
 
 ให้ GitHub push ขึ้น Apps Script อัตโนมัติ: ตั้ง repo secrets `CLASPRC_JSON` (เนื้อหาไฟล์
 `~/.clasprc.json` หลัง `clasp login`), `SCRIPT_ID` (ถ้าไม่ได้ commit `.clasp.json`) และ
@@ -147,11 +153,13 @@ src/
   MinMax.js       คำนวณ MIN/MAX จากยอดเบิกจริง 9 เดือน + แยกประเภทเบิกประจำ/ตามงาน/dead stock
   Reorder.js      สร้างคิวรายการที่ต้องสั่ง แยกตาม PC
   Notify.js       ส่งอีเมลแจ้ง PC owner + เตือนซ้ำถ้าไม่ตอบใน 3 วัน
-  WebApp.js       doGet: ?pc=... → หน้ายืนยัน/แก้จำนวน, ไม่มี → หน้าเทียบยอด (Ui.js)
+  WebApp.js       doGet → หน้าเว็บ (Ui.js) ทุกลิงก์; submitConfirmation ชุดเก่ารันได้จาก editor เท่านั้น
   confirm.html    หน้า UI ของ WebApp.js
   Ui.js           เสิร์ฟหน้าเทียบยอดสั่งซื้อ + askClaudeFromUi
   DataFiles.js    ข้อมูลกลาง 4 ช่อง (ชีต data_*) อ่าน/เพิ่ม/เปลี่ยน/นำออก
-  Members.js      สมาชิก Admin/User
+  Members.js      สมาชิก Admin/User แบบ ID + รหัสผ่าน (hash), session token
+  Api.js          ทางเข้าเดียวของหน้าเว็บ: api(token, fn, args) + doPost สำหรับหน้า GitHub/Vercel
+  SheetUtil.js    ตัวช่วยอ่าน/เขียนชีต + ownerOnly_
   Requests.js     workflow คำขอ: ส่ง PC → ยืนยัน → ตรวจงบ/เกินงบ → PR/PO → รับของ + Budget + เตือนซ้ำ
   MasterPc.js     PC → อีเมลผู้รับผิดชอบ / หัวหน้า / Budget ตั้งต้น
   Index.html, ui_*.html   GENERATED จาก web/ โดย tools/build-appsscript.ps1

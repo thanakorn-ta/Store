@@ -18,6 +18,7 @@
 var IMPORT_FOLDER_ID = 'PUT_DRIVE_FOLDER_ID_HERE';
 
 function importAllFiles() {
+  ownerOnly_();
   var folder = DriveApp.getFolderById(IMPORT_FOLDER_ID);
   importBalanceFile_(folder);
   importUsageFolder_(folder);

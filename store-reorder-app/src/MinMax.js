@@ -17,6 +17,7 @@
  */
 
 function recomputeMinMax() {
+  ownerOnly_();
   var ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   var usage = readSheetAsObjects_(ss, CONFIG.SHEETS.RAW_USAGE);
   var balance = readSheetAsObjects_(ss, CONFIG.SHEETS.RAW_BALANCE);

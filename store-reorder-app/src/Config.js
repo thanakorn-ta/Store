@@ -21,13 +21,17 @@ var CONFIG = {
     BUDGET: 'budget_master',          // นำเข้าจากไฟล์ Budget ประจำปี
     PR_LOG: 'pr_po_log',              // บันทึกทุกครั้งที่ออก PR/PO เพื่อหักงบเอง
     ACTIVITY_LOG: 'activity_log',     // log ทุกขั้นตอนสำหรับ Dashboard
-    MEMBERS: 'members',               // สมาชิก: email, name, role (admin/user), status
+    MEMBERS: 'members',               // สมาชิก: ID, ชื่อ, อีเมล, role (admin/user), status, รหัสผ่าน (hash)
     REQUESTS: 'requests',             // คำขอสั่งซื้อจาก user (หัวเอกสาร: งบ, เดือน, สถานะ)
     REQUEST_ITEMS: 'request_items'    // รายการสินค้าในแต่ละคำขอ
   },
 
-  // Admin ตั้งต้น — เข้าระบบครั้งแรกแล้วได้สิทธิ์ admin อัตโนมัติ (เพิ่มคนอื่นได้ในหน้า Admin)
+  // อีเมลของ Admin เริ่มต้น (ใช้รับอีเมลแจ้งเตือน) — แก้ได้ภายหลังในแท็บ Admin
   ADMIN_EMAILS: ['thanakorn@planbmedia.co.th'],
+
+  // บัญชี Admin เริ่มต้น — สร้างอัตโนมัติเมื่อยังไม่มี Admin ในชีต members
+  // ระบบบังคับให้เปลี่ยนรหัสผ่านหลังเข้าสู่ระบบครั้งแรก
+  DEFAULT_ADMIN: { username: 'admin', password: 'admin2026' },
 
   // สูตร MIN/MAX (ยืนยันจากไฟล์ MIN_MAX_Calculated.xlsx เดิม)
   // Safety Stock = 0.5 x avg_per_day x lead_time_days

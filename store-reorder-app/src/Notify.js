@@ -11,6 +11,7 @@
  */
 
 function sendReorderEmails() {
+  ownerOnly_();
   var ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   var sheet = ss.getSheetByName(CONFIG.SHEETS.REORDER_QUEUE);
   var rows = readSheetAsObjects_(ss, CONFIG.SHEETS.REORDER_QUEUE);
@@ -61,6 +62,7 @@ function renderReorderEmail_(pcName, items, confirmLink) {
 
 /** Any queue rows still "ส่งอีเมลแล้ว รอตอบกลับ" after N days -> resend once. */
 function remindUnansweredReorders() {
+  ownerOnly_();
   var ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   var sheet = ss.getSheetByName(CONFIG.SHEETS.REORDER_QUEUE);
   var rows = readSheetAsObjects_(ss, CONFIG.SHEETS.REORDER_QUEUE);

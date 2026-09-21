@@ -7,6 +7,7 @@
  */
 
 function buildReorderQueue() {
+  ownerOnly_();
   var ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   var minmax = readSheetAsObjects_(ss, CONFIG.SHEETS.MINMAX);
   var masterPc = readSheetAsObjects_(ss, CONFIG.SHEETS.MASTER_PC);

@@ -181,8 +181,10 @@
           <section>
             <h3>สมาชิก</h3>
             <form id="memberAdd" class="inline-form">
-              <input name="email" type="email" placeholder="อีเมล @planbmedia.co.th" required>
+              <input name="username" placeholder="ID" required autocomplete="off">
+              <input name="password" type="password" placeholder="รหัสผ่านเริ่มต้น (8+ ตัว)" minlength="8" required autocomplete="new-password">
               <input name="name" placeholder="ชื่อ">
+              <input name="email" type="email" placeholder="อีเมล (รับแจ้งเตือน)">
               <select name="role"><option value="user">User</option><option value="admin">Admin</option></select>
               <button class="btn sm">เพิ่มสมาชิก</button>
             </form>

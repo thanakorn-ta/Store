@@ -25,6 +25,7 @@ function include(name) {
  * (ANTHROPIC_API_KEY), so viewers of the Web App never see it.
  */
 function askClaudeFromUi(system, userContent) {
+  requireActive_();
   if (String(userContent).length > 200000) throw new Error('ข้อมูลที่ส่งให้ AI ยาวเกินไป');
   return callClaude_(system, userContent, 4000);
 }

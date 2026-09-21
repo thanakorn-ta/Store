@@ -77,6 +77,76 @@ function draftBudgetExceptionRequest_(pcName, items, shortfall) {
   return callClaude_(system, user, 400);
 }
 
+// ============================================================ Api.js
+/**
+ * Api.js
+ * Single entry point for the web page.
+ *   - Apps Script page:       google.script.run.api(token, fn, args)
+ *   - GitHub/Vercel page:     POST <exec url>  body: {"token","fn","args"}  (Content-Type text/plain,
+ *                             so the browser sends no CORS preflight; Apps Script answers with
+ *                             Access-Control-Allow-Origin: *)
+ * Only functions listed below are reachable; everything except login/register
+ * needs a valid session token.
+ * Requires the Web App deployment "Who has access: Anyone" so the static page can reach it.
+ */
+
+// Names, not references: with separate .gs files the other files may not be loaded
+// yet when this file's top level runs, so resolve at call time.
+var PUBLIC_FNS = ['login', 'register'];
+var MEMBER_FNS = [
+  'getSessionInfo', 'logout', 'changePassword', 'updateProfile',
+  // shared Store data
+  'getStoreData', 'saveDataFile', 'removeDataFile',
+  // budget + requests (workflow)
+  'getBudgetOptions', 'importBudget', 'submitOrderRequest', 'createRound', 'confirmRequest', 'rejectByPc',
+  'cancelMyRequest', 'decideRequest', 'requestOverBudget', 'managerDecision', 'issuePo', 'markReceived',
+  'listMyRequests', 'listAllRequests', 'installReminderTrigger',
+  // admin
+  'listMembers', 'saveMember', 'listMasterPc', 'saveMasterPc',
+  // AI
+  'askClaudeFromUi'
+];
+
+function api(token, fn, args) {
+  fn = String(fn);
+  args = args || [];
+  if (PUBLIC_FNS.indexOf(fn) !== -1) return globalThis[fn].apply(null, args);
+  if (MEMBER_FNS.indexOf(fn) === -1) throw new Error('ไม่รู้จักคำสั่ง ' + fn);
+  var user = userFromToken_(token);
+  if (!user) throw new Error('SESSION_EXPIRED: กรุณาเข้าสู่ระบบใหม่');
+  user.token = token;
+  CURRENT_USER_ = user;
+  try {
+    return toJsonSafe_(globalThis[fn].apply(null, args));
+  } finally {
+    CURRENT_USER_ = null;
+  }
+}
+
+/** HTTP transport for the GitHub/Vercel page. Always answers 200 with {ok, result|error}. */
+function doPost(e) {
+  var out;
+  try {
+    var body = JSON.parse(e.postData.contents);
+    out = { ok: true, result: toJsonSafe_(api(body.token, body.fn, body.args)) };
+  } catch (err) {
+    out = { ok: false, error: String(err && err.message || err) };
+  }
+  return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON);
+}
+
+/** Dates → 'yyyy-MM-dd HH:mm' strings (google.script.run can't return Date objects either). */
+function toJsonSafe_(v) {
+  if (v instanceof Date) return Utilities.formatDate(v, 'Asia/Bangkok', 'yyyy-MM-dd HH:mm');
+  if (Array.isArray(v)) return v.map(toJsonSafe_);
+  if (v && typeof v === 'object') {
+    var o = {};
+    Object.keys(v).forEach(function (k) { o[k] = toJsonSafe_(v[k]); });
+    return o;
+  }
+  return v === undefined ? null : v;
+}
+
 // ============================================================ Budget.js
 /**
  * Budget.js
@@ -171,13 +241,17 @@ var CONFIG = {
     BUDGET: 'budget_master',          // นำเข้าจากไฟล์ Budget ประจำปี
     PR_LOG: 'pr_po_log',              // บันทึกทุกครั้งที่ออก PR/PO เพื่อหักงบเอง
     ACTIVITY_LOG: 'activity_log',     // log ทุกขั้นตอนสำหรับ Dashboard
-    MEMBERS: 'members',               // สมาชิก: email, name, role (admin/user), status
+    MEMBERS: 'members',               // สมาชิก: ID, ชื่อ, อีเมล, role (admin/user), status, รหัสผ่าน (hash)
     REQUESTS: 'requests',             // คำขอสั่งซื้อจาก user (หัวเอกสาร: งบ, เดือน, สถานะ)
     REQUEST_ITEMS: 'request_items'    // รายการสินค้าในแต่ละคำขอ
   },
 
-  // Admin ตั้งต้น — เข้าระบบครั้งแรกแล้วได้สิทธิ์ admin อัตโนมัติ (เพิ่มคนอื่นได้ในหน้า Admin)
+  // อีเมลของ Admin เริ่มต้น (ใช้รับอีเมลแจ้งเตือน) — แก้ได้ภายหลังในแท็บ Admin
   ADMIN_EMAILS: ['thanakorn@planbmedia.co.th'],
+
+  // บัญชี Admin เริ่มต้น — สร้างอัตโนมัติเมื่อยังไม่มี Admin ในชีต members
+  // ระบบบังคับให้เปลี่ยนรหัสผ่านหลังเข้าสู่ระบบครั้งแรก
+  DEFAULT_ADMIN: { username: 'admin', password: 'admin2026' },
 
   // สูตร MIN/MAX (ยืนยันจากไฟล์ MIN_MAX_Calculated.xlsx เดิม)
   // Safety Stock = 0.5 x avg_per_day x lead_time_days
@@ -363,6 +437,7 @@ function updateDataIndex_(ss, slot, fileName, entry) {
 var IMPORT_FOLDER_ID = 'PUT_DRIVE_FOLDER_ID_HERE';
 
 function importAllFiles() {
+  ownerOnly_();
   var folder = DriveApp.getFolderById(IMPORT_FOLDER_ID);
   importBalanceFile_(folder);
   importUsageFolder_(folder);
@@ -538,6 +613,7 @@ function writeRows_(sheetName, header, rows) {
  */
 
 function runWeeklyPipeline() {
+  ownerOnly_();
   importAllFiles();
   recomputeMinMax();
   buildReorderQueue();
@@ -546,6 +622,7 @@ function runWeeklyPipeline() {
 }
 
 function installWeeklyTrigger() {
+  ownerOnly_();
   ScriptApp.getProjectTriggers().forEach(function (t) {
     if (t.getHandlerFunction() === 'runWeeklyPipeline' || t.getHandlerFunction() === 'remindUnansweredReorders') {
       ScriptApp.deleteTrigger(t);
@@ -637,105 +714,104 @@ function saveMasterPc(input) {
 // ============================================================ Members.js
 /**
  * Members.js
- * Membership for the Web App. Identity comes from the Google Workspace login
- * (Session.getActiveUser) — no separate passwords. This only works when the
- * Web App is deployed with "Who has access: Anyone within planbmedia.co.th";
- * with "Anyone" Google does not reveal the viewer's email.
+ * Username/password membership (Admin / User) for the Web App and for the
+ * GitHub/Vercel page that calls this script as its backend (see Api.js).
  *
- * members sheet: email | name | role (admin/user) | status (active/pending/disabled)
- *                | created_at | updated_at | updated_by
- * CONFIG.ADMIN_EMAILS are auto-created as active admins on first visit.
+ * members sheet: username | name | email | role (admin/user) | status (active/pending/disabled)
+ *                | pw_hash | pw_salt | must_change | created_at | updated_at | updated_by | last_login
+ *   - passwords are stored salted + hashed (SHA-256, iterated), never in plain text
+ *   - email is used for notifications and to match Master PC owners/managers
+ *
+ * First run: when no admin exists, CONFIG.DEFAULT_ADMIN is created with
+ * must_change = true, and the page asks for a new password after login.
+ *
+ * Sessions: login() returns a random token kept in CacheService for
+ * SESSION_SECONDS (sliding). Every page call goes through api(token, fn, args),
+ * which sets CURRENT_USER_ before running the requested function.
  */
 
-var MEMBER_HEADER = ['email', 'name', 'role', 'status', 'created_at', 'updated_at', 'updated_by'];
+var MEMBER_HEADER = ['username', 'name', 'email', 'role', 'status', 'pw_hash', 'pw_salt', 'must_change',
+  'created_at', 'updated_at', 'updated_by', 'last_login'];
+var SESSION_SECONDS = 6 * 3600;
+var MAX_FAILED_LOGINS = 5;
+var CURRENT_USER_ = null;
 
-function db_() {
-  return SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
-}
+// ------------------------------------------------------------ password + session primitives
 
-/** Returns the sheet, creating it with a header row if missing. */
-function ensureSheet_(ss, name, header) {
-  var sheet = ss.getSheetByName(name);
-  if (!sheet) {
-    sheet = ss.insertSheet(name);
-    sheet.getRange(1, 1, 1, header.length).setValues([header]).setFontWeight('bold');
-    sheet.setFrozenRows(1);
+function hashPassword_(password, salt) {
+  var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, salt + '|' + password, Utilities.Charset.UTF_8);
+  for (var i = 0; i < 300; i++) {
+    bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, bytes.concat(Utilities.newBlob(salt).getBytes()));
   }
-  return sheet;
+  return Utilities.base64Encode(bytes);
 }
 
-/**
- * Like ensureSheet_, but also appends any header columns that an older
- * version of the sheet is missing, so new fields never shift existing data.
- * Returns { sheet, header } where header is the sheet's actual column order.
- */
-function ensureHeader_(ss, name, header) {
-  var sheet = ensureSheet_(ss, name, header);
-  var lastCol = Math.max(1, sheet.getLastColumn ? sheet.getLastColumn() : header.length);
-  var current = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(String).filter(String);
-  var missing = header.filter(function (h) { return current.indexOf(h) === -1; });
-  if (missing.length) {
-    sheet.getRange(1, current.length + 1, 1, missing.length).setValues([missing]).setFontWeight('bold');
-    current = current.concat(missing);
-  }
-  return { sheet: sheet, header: current };
+function newSalt_() {
+  return Utilities.getUuid().replace(/-/g, '');
 }
 
-/** Appends one object as a row, placing each field in its named column. */
-function appendObject_(ss, name, header, obj) {
-  var h = ensureHeader_(ss, name, header);
-  h.sheet.appendRow(h.header.map(function (k) { return obj[k] == null ? '' : obj[k]; }));
+function validUsername_(u) {
+  return /^[a-z0-9._-]{3,40}$/.test(u);
 }
 
-/** Appends many objects in one write. */
-function appendObjects_(ss, name, header, objs) {
-  if (!objs.length) return;
-  var h = ensureHeader_(ss, name, header);
-  var rows = objs.map(function (o) { return h.header.map(function (k) { return o[k] == null ? '' : o[k]; }); });
-  h.sheet.getRange(h.sheet.getLastRow() + 1, 1, rows.length, h.header.length).setValues(rows);
+function checkNewPassword_(p) {
+  if (String(p || '').length < 8) throw new Error('รหัสผ่านต้องยาวอย่างน้อย 8 ตัวอักษร');
 }
 
-function activeEmail_() {
-  var email = String(Session.getActiveUser().getEmail() || '').trim().toLowerCase();
-  if (!email) {
-    throw new Error('ระบบอ่านอีเมลผู้ใช้ไม่ได้ — Deploy Web App ต้องตั้ง "ผู้มีสิทธิ์เข้าถึง: ทุกคนใน planbmedia.co.th"');
-  }
-  return email;
-}
-
-/** All member rows as objects with their 1-based sheet row number. */
 function readMembers_(ss) {
-  var sheet = ensureSheet_(ss, CONFIG.SHEETS.MEMBERS, MEMBER_HEADER);
-  var values = sheet.getDataRange().getValues();
+  var h = ensureHeader_(ss, CONFIG.SHEETS.MEMBERS, MEMBER_HEADER);
+  var values = h.sheet.getDataRange().getValues();
+  var col = {};
+  h.header.forEach(function (k, i) { col[k] = i; });
   var out = [];
   for (var i = 1; i < values.length; i++) {
-    if (!values[i][0]) continue;
+    var row = values[i];
+    var username = String(row[col.username] || '').trim().toLowerCase();
+    if (!username) continue;
     out.push({
-      row: i + 1,
-      email: String(values[i][0]).trim().toLowerCase(),
-      name: String(values[i][1] || ''),
-      role: String(values[i][2] || 'user'),
-      status: String(values[i][3] || 'pending')
+      row: i + 1, username: username, name: String(row[col.name] || ''),
+      email: String(row[col.email] || '').trim().toLowerCase(), role: String(row[col.role] || 'user'),
+      status: String(row[col.status] || 'pending'), pw_hash: String(row[col.pw_hash] || ''),
+      pw_salt: String(row[col.pw_salt] || ''), must_change: row[col.must_change] === true || row[col.must_change] === 'TRUE'
     });
   }
   return out;
 }
 
-/** Current viewer's member record, or {status:'none'} if not registered. */
-function currentMember_() {
-  var email = activeEmail_();
-  var ss = db_();
-  var m = readMembers_(ss).filter(function (x) { return x.email === email; })[0];
-  if (m) return m;
+function writeMemberFields_(ss, rowNum, fields) {
+  var h = ensureHeader_(ss, CONFIG.SHEETS.MEMBERS, MEMBER_HEADER);
+  Object.keys(fields).forEach(function (k) {
+    var c = h.header.indexOf(k);
+    if (c !== -1) h.sheet.getRange(rowNum, c + 1).setValue(fields[k]);
+  });
+}
 
-  var bootstrap = CONFIG.ADMIN_EMAILS.map(function (e) { return e.toLowerCase(); }).indexOf(email) !== -1;
-  if (bootstrap) {
-    var now = new Date();
-    var sheet = ensureSheet_(ss, CONFIG.SHEETS.MEMBERS, MEMBER_HEADER);
-    sheet.appendRow([email, email.split('@')[0], 'admin', 'active', now, now, 'bootstrap']);
-    return { email: email, name: email.split('@')[0], role: 'admin', status: 'active', row: sheet.getLastRow() };
-  }
-  return { email: email, name: '', role: '', status: 'none' };
+/** Creates the default admin when the sheet has no admin at all. */
+function ensureDefaultAdmin_(ss) {
+  var members = readMembers_(ss);
+  if (members.some(function (m) { return m.role === 'admin' && m.status === 'active'; })) return members;
+  var d = CONFIG.DEFAULT_ADMIN;
+  var salt = newSalt_();
+  var now = new Date();
+  appendObject_(ss, CONFIG.SHEETS.MEMBERS, MEMBER_HEADER, {
+    username: d.username, name: 'Admin', email: (CONFIG.ADMIN_EMAILS || [])[0] || '', role: 'admin', status: 'active',
+    pw_hash: hashPassword_(d.password, salt), pw_salt: salt, must_change: true,
+    created_at: now, updated_at: now, updated_by: 'bootstrap'
+  });
+  return readMembers_(ss);
+}
+
+function toMe_(m) {
+  // email doubles as the identity used across requests / Master PC; fall back to the username
+  return { id: m.username, name: m.name || m.username, email: m.email || m.username, role: m.role, status: m.status,
+    mustChange: m.must_change, hasEmail: !!m.email };
+}
+
+// ------------------------------------------------------------ who is calling
+
+function currentMember_() {
+  if (!CURRENT_USER_) throw new Error('กรุณาเข้าสู่ระบบ');
+  return CURRENT_USER_;
 }
 
 function requireActive_() {
@@ -752,94 +828,184 @@ function requireAdmin_() {
 
 function adminEmails_(ss) {
   return readMembers_(ss || db_())
-    .filter(function (m) { return m.role === 'admin' && m.status === 'active'; })
+    .filter(function (m) { return m.role === 'admin' && m.status === 'active' && /@/.test(m.email); })
     .map(function (m) { return m.email; });
 }
 
-function webAppUrl_() {
-  try { return ScriptApp.getService().getUrl() || ''; } catch (e) { return ''; }
+/** Resolves a session token to the member (re-read from the sheet so role/status changes apply at once). */
+function userFromToken_(token) {
+  if (!token) return null;
+  var cache = CacheService.getScriptCache();
+  var username = cache.get('sess:' + token);
+  if (!username) return null;
+  var m = readMembers_(db_()).filter(function (x) { return x.username === username; })[0];
+  if (!m || m.status === 'disabled') { cache.remove('sess:' + token); return null; }
+  cache.put('sess:' + token, username, SESSION_SECONDS); // sliding expiry
+  return toMe_(m);
 }
 
-// ------------------------------------------------------------ called from the page
+// ------------------------------------------------------------ public (no session needed; called via api())
 
-function getSessionInfo() {
-  var m = currentMember_();
-  return { email: m.email, name: m.name, role: m.role, status: m.status, appUrl: webAppUrl_() };
+/** Returns { token, user } or throws. Locks a username for 10 minutes after repeated failures. */
+function login(username, password) {
+  username = String(username || '').trim().toLowerCase();
+  var cache = CacheService.getScriptCache();
+  var failKey = 'fail:' + username;
+  var fails = Number(cache.get(failKey) || 0);
+  if (fails >= MAX_FAILED_LOGINS) throw new Error('ใส่รหัสผิดหลายครั้ง — ลองใหม่ใน 10 นาที');
+
+  var ss = db_();
+  var m = ensureDefaultAdmin_(ss).filter(function (x) { return x.username === username; })[0];
+  if (!m || !m.pw_hash || hashPassword_(String(password || ''), m.pw_salt) !== m.pw_hash) {
+    cache.put(failKey, String(fails + 1), 600);
+    throw new Error('ID หรือรหัสผ่านไม่ถูกต้อง');
+  }
+  cache.remove(failKey);
+  if (m.status === 'pending') throw new Error('บัญชีนี้รอ Admin อนุมัติ');
+  if (m.status === 'disabled') throw new Error('บัญชีนี้ถูกระงับ ติดต่อ Admin');
+
+  var token = Utilities.getUuid() + Utilities.getUuid().slice(0, 8);
+  cache.put('sess:' + token, m.username, SESSION_SECONDS);
+  writeMemberFields_(ss, m.row, { last_login: new Date() });
+  logActivity_('login', 'ok', m.username);
+  return { token: token, user: toMe_(m), appUrl: webAppUrl_() };
 }
 
-/** A signed-in but unregistered viewer asks to join; admins get an email. */
-function requestAccess(name) {
-  var email = activeEmail_();
-  name = String(name || '').trim().slice(0, 80);
+/** Self sign-up → pending until an admin approves. */
+function register(input) {
+  var username = String(input.username || '').trim().toLowerCase();
+  var email = String(input.email || '').trim().toLowerCase();
+  var name = String(input.name || '').trim().slice(0, 80);
+  if (!validUsername_(username)) throw new Error('ID ใช้ได้เฉพาะ a-z 0-9 . _ - ยาว 3–40 ตัว');
   if (!name) throw new Error('กรุณากรอกชื่อ');
+  if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Error('อีเมลไม่ถูกต้อง');
+  checkNewPassword_(input.password);
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
     var ss = db_();
-    if (readMembers_(ss).some(function (m) { return m.email === email; })) return getSessionInfo();
-    var now = new Date();
-    ensureSheet_(ss, CONFIG.SHEETS.MEMBERS, MEMBER_HEADER).appendRow([email, name, 'user', 'pending', now, now, email]);
-    var admins = adminEmails_(ss);
-    if (admins.length) {
-      MailApp.sendEmail({
-        to: admins.join(','),
-        subject: '[Store Reorder] ขอเข้าใช้งาน: ' + name,
-        htmlBody: esc_(name) + ' (' + esc_(email) + ') ขอเข้าใช้งานระบบ<br>' +
-          'อนุมัติได้ที่แท็บ Admin: <a href="' + webAppUrl_() + '">' + webAppUrl_() + '</a>'
-      });
-    }
+    if (ensureDefaultAdmin_(ss).some(function (m) { return m.username === username; })) throw new Error('ID นี้มีคนใช้แล้ว');
+    var salt = newSalt_(), now = new Date();
+    appendObject_(ss, CONFIG.SHEETS.MEMBERS, MEMBER_HEADER, {
+      username: username, name: name, email: email, role: 'user', status: 'pending',
+      pw_hash: hashPassword_(String(input.password), salt), pw_salt: salt, must_change: false,
+      created_at: now, updated_at: now, updated_by: 'register'
+    });
   } finally {
     lock.releaseLock();
   }
-  return getSessionInfo();
+  var admins = adminEmails_();
+  if (admins.length) {
+    MailApp.sendEmail({ to: admins.join(','), subject: '[Store Reorder] สมัครสมาชิกใหม่: ' + name,
+      htmlBody: esc_(name) + ' (ID: ' + esc_(username) + (email ? ', ' + esc_(email) : '') + ') สมัครสมาชิก — อนุมัติได้ที่แท็บ Admin' +
+        (webAppUrl_() ? '<br><a href="' + webAppUrl_() + '">' + webAppUrl_() + '</a>' : '') });
+  }
+  logActivity_('register', 'ok', username);
+  return 'สมัครแล้ว — รอ Admin อนุมัติ แล้วเข้าสู่ระบบด้วย ID นี้';
 }
+
+// ------------------------------------------------------------ signed-in user
+
+function getSessionInfo() {
+  var me = currentMember_();
+  return { id: me.id, name: me.name, email: me.hasEmail ? me.email : '', role: me.role, status: me.status,
+    mustChange: me.mustChange, appUrl: webAppUrl_() };
+}
+
+function logout() {
+  if (CURRENT_USER_ && CURRENT_USER_.token) CacheService.getScriptCache().remove('sess:' + CURRENT_USER_.token);
+  return true;
+}
+
+function changePassword(oldPassword, newPassword) {
+  var me = requireActive_();
+  checkNewPassword_(newPassword);
+  if (String(newPassword) === CONFIG.DEFAULT_ADMIN.password) throw new Error('ห้ามใช้รหัสผ่านเริ่มต้น');
+  var ss = db_();
+  var m = readMembers_(ss).filter(function (x) { return x.username === me.id; })[0];
+  if (hashPassword_(String(oldPassword || ''), m.pw_salt) !== m.pw_hash) throw new Error('รหัสผ่านเดิมไม่ถูกต้อง');
+  var salt = newSalt_();
+  writeMemberFields_(ss, m.row, { pw_hash: hashPassword_(String(newPassword), salt), pw_salt: salt, must_change: false,
+    updated_at: new Date(), updated_by: me.id });
+  logActivity_('changePassword', 'ok', me.id);
+  return getSessionInfoAfterChange_(me);
+}
+
+function getSessionInfoAfterChange_(me) {
+  var info = getSessionInfo();
+  info.mustChange = false;
+  return info;
+}
+
+/** The signed-in user updates their own name/email. */
+function updateProfile(input) {
+  var me = requireActive_();
+  var email = String(input.email || '').trim().toLowerCase();
+  if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Error('อีเมลไม่ถูกต้อง');
+  var ss = db_();
+  var m = readMembers_(ss).filter(function (x) { return x.username === me.id; })[0];
+  writeMemberFields_(ss, m.row, { name: String(input.name || m.name).slice(0, 80), email: email, updated_at: new Date(), updated_by: me.id });
+  return true;
+}
+
+// ------------------------------------------------------------ admin: members
 
 function listMembers() {
   requireAdmin_();
-  return readMembers_(db_()).map(function (m) {
-    return { email: m.email, name: m.name, role: m.role, status: m.status };
+  return ensureDefaultAdmin_(db_()).map(function (m) {
+    return { username: m.username, name: m.name, email: m.email, role: m.role, status: m.status, mustChange: m.must_change };
   });
 }
 
-/** Add or update a member. Admins cannot demote/disable themselves (avoids lock-out). */
+/**
+ * Add or update a member. input: { username, name, email, role, status, password? }
+ * password (when given) sets/resets it and forces a change at next login.
+ * Admins cannot demote/disable themselves (avoids lock-out).
+ */
 function saveMember(input) {
   var me = requireAdmin_();
+  var username = String(input.username || '').trim().toLowerCase();
+  if (!validUsername_(username)) throw new Error('ID ใช้ได้เฉพาะ a-z 0-9 . _ - ยาว 3–40 ตัว');
   var email = String(input.email || '').trim().toLowerCase();
-  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Error('อีเมลไม่ถูกต้อง');
+  if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Error('อีเมลไม่ถูกต้อง');
   var role = input.role === 'admin' ? 'admin' : 'user';
   var status = ['active', 'pending', 'disabled'].indexOf(input.status) !== -1 ? input.status : 'active';
-  if (email === me.email && (role !== 'admin' || status !== 'active')) {
-    throw new Error('เปลี่ยนสิทธิ์/ระงับบัญชีตัวเองไม่ได้');
-  }
+  if (username === me.id && (role !== 'admin' || status !== 'active')) throw new Error('เปลี่ยนสิทธิ์/ระงับบัญชีตัวเองไม่ได้');
+  if (input.password) checkNewPassword_(input.password);
+
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
+  var approvedNow = false, existing;
   try {
     var ss = db_();
-    var sheet = ensureSheet_(ss, CONFIG.SHEETS.MEMBERS, MEMBER_HEADER);
+    existing = readMembers_(ss).filter(function (m) { return m.username === username; })[0];
     var now = new Date();
-    var existing = readMembers_(ss).filter(function (m) { return m.email === email; })[0];
-    var name = String(input.name || (existing && existing.name) || email.split('@')[0]).slice(0, 80);
+    var fields = { name: String(input.name || (existing && existing.name) || username).slice(0, 80), email: email,
+      role: role, status: status, updated_at: now, updated_by: me.id };
+    if (input.password) {
+      var salt = newSalt_();
+      fields.pw_hash = hashPassword_(String(input.password), salt);
+      fields.pw_salt = salt;
+      fields.must_change = true;
+    }
     if (existing) {
-      sheet.getRange(existing.row, 2, 1, 3).setValues([[name, role, status]]);
-      sheet.getRange(existing.row, 6, 1, 2).setValues([[now, me.email]]);
-      if (existing.status === 'pending' && status === 'active') {
-        MailApp.sendEmail(email, '[Store Reorder] อนุมัติการเข้าใช้งานแล้ว',
-          'บัญชีของคุณได้รับอนุมัติแล้ว เข้าใช้งานได้ที่ ' + webAppUrl_());
-      }
+      writeMemberFields_(ss, existing.row, fields);
+      approvedNow = existing.status === 'pending' && status === 'active';
     } else {
-      sheet.appendRow([email, name, role, status, now, now, me.email]);
+      if (!input.password) throw new Error('สมาชิกใหม่ต้องตั้งรหัสผ่านเริ่มต้น');
+      fields.username = username;
+      fields.created_at = now;
+      appendObject_(ss, CONFIG.SHEETS.MEMBERS, MEMBER_HEADER, fields);
     }
   } finally {
     lock.releaseLock();
   }
-  logActivity_('saveMember', 'ok', me.email + ' -> ' + email + ' ' + role + '/' + status);
+  if (approvedNow && email) {
+    MailApp.sendEmail(email, '[Store Reorder] อนุมัติการเข้าใช้งานแล้ว',
+      'บัญชี ID ' + username + ' ได้รับอนุมัติแล้ว เข้าใช้งานได้ที่ ' + webAppUrl_());
+  }
+  logActivity_('saveMember', 'ok', me.id + ' -> ' + username + ' ' + role + '/' + status + (input.password ? ' +password' : ''));
   return listMembers();
-}
-
-function esc_(s) {
-  return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
-    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
-  });
 }
 
 // ============================================================ MinMax.js
@@ -862,6 +1028,7 @@ function esc_(s) {
  */
 
 function recomputeMinMax() {
+  ownerOnly_();
   var ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   var usage = readSheetAsObjects_(ss, CONFIG.SHEETS.RAW_USAGE);
   var balance = readSheetAsObjects_(ss, CONFIG.SHEETS.RAW_BALANCE);
@@ -984,6 +1151,7 @@ function readSheetAsObjects_(ss, sheetName) {
  */
 
 function sendReorderEmails() {
+  ownerOnly_();
   var ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   var sheet = ss.getSheetByName(CONFIG.SHEETS.REORDER_QUEUE);
   var rows = readSheetAsObjects_(ss, CONFIG.SHEETS.REORDER_QUEUE);
@@ -1034,6 +1202,7 @@ function renderReorderEmail_(pcName, items, confirmLink) {
 
 /** Any queue rows still "ส่งอีเมลแล้ว รอตอบกลับ" after N days -> resend once. */
 function remindUnansweredReorders() {
+  ownerOnly_();
   var ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   var sheet = ss.getSheetByName(CONFIG.SHEETS.REORDER_QUEUE);
   var rows = readSheetAsObjects_(ss, CONFIG.SHEETS.REORDER_QUEUE);
@@ -1091,6 +1260,7 @@ function buildConfirmLink_(pcCode, skus) {
  */
 
 function buildReorderQueue() {
+  ownerOnly_();
   var ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   var minmax = readSheetAsObjects_(ss, CONFIG.SHEETS.MINMAX);
   var masterPc = readSheetAsObjects_(ss, CONFIG.SHEETS.MASTER_PC);
@@ -1538,6 +1708,7 @@ function markReceived(id, note) {
 
 /** Re-sends the confirm email for requests still waiting on the PC after REMINDER_AFTER_DAYS. */
 function remindPendingConfirmations() {
+  ownerOnly_();
   var ss = db_();
   var days = CONFIG.REMINDER_AFTER_DAYS || 3;
   var cutoff = Date.now() - days * 86400000;
@@ -1708,7 +1879,7 @@ function appLink_(id, label) {
 }
 
 function mailPeople_(to, subject, html) {
-  to = uniq_((to || []).map(function (e) { return String(e).toLowerCase(); }));
+  to = uniq_((to || []).map(function (e) { return String(e).toLowerCase(); }).filter(function (e) { return /@/.test(e); }));
   if (!to.length) return;
   MailApp.sendEmail({ to: to.join(','), subject: subject, htmlBody: html });
 }
@@ -1774,6 +1945,82 @@ function fmtMoney_(n) {
   return (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+// ============================================================ SheetUtil.js
+/**
+ * SheetUtil.js
+ * Small helpers shared by every module that reads/writes the database Sheet.
+ */
+
+function db_() {
+  return SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+}
+
+/** Returns the sheet, creating it with a header row if missing. */
+function ensureSheet_(ss, name, header) {
+  var sheet = ss.getSheetByName(name);
+  if (!sheet) {
+    sheet = ss.insertSheet(name);
+    sheet.getRange(1, 1, 1, header.length).setValues([header]).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+/**
+ * Like ensureSheet_, but also appends any header columns that an older
+ * version of the sheet is missing, so new fields never shift existing data.
+ * Returns { sheet, header } where header is the sheet's actual column order.
+ */
+function ensureHeader_(ss, name, header) {
+  var sheet = ensureSheet_(ss, name, header);
+  var lastCol = Math.max(1, sheet.getLastColumn ? sheet.getLastColumn() : header.length);
+  var current = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(String).filter(String);
+  var missing = header.filter(function (h) { return current.indexOf(h) === -1; });
+  if (missing.length) {
+    sheet.getRange(1, current.length + 1, 1, missing.length).setValues([missing]).setFontWeight('bold');
+    current = current.concat(missing);
+  }
+  return { sheet: sheet, header: current };
+}
+
+/** Appends one object as a row, placing each field in its named column. */
+function appendObject_(ss, name, header, obj) {
+  var h = ensureHeader_(ss, name, header);
+  h.sheet.appendRow(h.header.map(function (k) { return obj[k] == null ? '' : obj[k]; }));
+}
+
+/** Appends many objects in one write. */
+function appendObjects_(ss, name, header, objs) {
+  if (!objs.length) return;
+  var h = ensureHeader_(ss, name, header);
+  var rows = objs.map(function (o) { return h.header.map(function (k) { return o[k] == null ? '' : o[k]; }); });
+  h.sheet.getRange(h.sheet.getLastRow() + 1, 1, rows.length, h.header.length).setValues(rows);
+}
+
+function webAppUrl_() {
+  try { return ScriptApp.getService().getUrl() || ''; } catch (e) { return ''; }
+}
+
+function esc_(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+/**
+ * Guard for functions meant for the Apps Script editor or time triggers only.
+ * The Web App is deployed for "Anyone", so every top-level function without a
+ * trailing underscore can also be invoked from a browser via google.script.run.
+ * Editor runs and installable triggers execute as the owner, so the active and
+ * effective users match; anonymous or other visitors don't.
+ */
+function ownerOnly_() {
+  var active = String(Session.getActiveUser().getEmail() || '');
+  if (!active || active !== String(Session.getEffectiveUser().getEmail() || '')) {
+    throw new Error('ฟังก์ชันนี้รันได้จาก Apps Script editor / trigger เท่านั้น');
+  }
+}
+
 // ============================================================ Ui.js
 /**
  * Ui.js
@@ -1802,6 +2049,7 @@ function include(name) {
  * (ANTHROPIC_API_KEY), so viewers of the Web App never see it.
  */
 function askClaudeFromUi(system, userContent) {
+  requireActive_();
   if (String(userContent).length > 200000) throw new Error('ข้อมูลที่ส่งให้ AI ยาวเกินไป');
   return callClaude_(system, userContent, 4000);
 }
@@ -1810,27 +2058,17 @@ function askClaudeFromUi(system, userContent) {
 // ============================================================ WebApp.js
 /**
  * WebApp.js
- * Confirmation page (step 6 in the workflow): a PC owner opens their emailed
- * link, sees the suggested quantities, can edit/confirm/reject per line, and
- * submits. Deploy via `clasp deploy` (or the Apps Script editor) as a Web App
- * with access "Anyone within domain" (see appsscript.json).
+ * doGet serves the web UI (Ui.js) for every URL, including links from emails
+ * (?req=REQ-...). Sign-in happens inside the page (Members.js / Api.js).
+ *
+ * The older per-PC confirm page (confirm.html + submitConfirmation, fed by
+ * Notify.js/reorder_queue) is superseded by the request workflow in
+ * Requests.js; submitConfirmation is kept for the legacy pipeline and can
+ * only run from the editor/trigger.
  */
 
 function doGet(e) {
-  // Emailed confirm links carry ?pc=...&skus=...; anything else is the main UI (Ui.js)
-  if (!e.parameter.pc) return renderReorderUi_();
-
-  var pcCode = e.parameter.pc || '';
-  var skus = (e.parameter.skus || '').split(',').filter(String);
-
-  var ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
-  var queue = readSheetAsObjects_(ss, CONFIG.SHEETS.REORDER_QUEUE);
-  var items = queue.filter(function (r) { return r.pc_code === pcCode && skus.indexOf(r.sku) !== -1; });
-
-  var template = HtmlService.createTemplateFromFile('confirm');
-  template.pcCode = pcCode;
-  template.items = items;
-  return template.evaluate().setTitle('ยืนยันรายการสั่งซื้อ');
+  return renderReorderUi_();
 }
 
 /**
@@ -1838,6 +2076,7 @@ function doGet(e) {
  * payload: [{ sku, confirmedQty, note }, ...]
  */
 function submitConfirmation(pcCode, payload) {
+  ownerOnly_();
   var ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
   var sheet = ss.getSheetByName(CONFIG.SHEETS.REORDER_QUEUE);
   var data = sheet.getDataRange().getValues();
