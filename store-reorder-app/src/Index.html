@@ -33,8 +33,12 @@
     <!-- 1. Files -->
     <section id="filesPanel" class="panel">
       <div class="panel-head">
-        <h2>1. นำเข้าไฟล์</h2>
-        <p class="hint">ลากไฟล์มาวางตรงไหนก็ได้ ระบบจะดูหัวตารางแล้วจัดเข้าช่องให้เอง · ไฟล์ประมวลผลในเครื่องนี้เท่านั้น ไม่ถูกอัปโหลดไปที่ไหน</p>
+        <h2>1. ข้อมูล Store</h2>
+        <p id="filesHint" class="hint">ลากไฟล์มาวางตรงไหนก็ได้ ระบบจะดูหัวตารางแล้วจัดเข้าช่องให้เอง · ไฟล์ประมวลผลในเครื่องนี้เท่านั้น ไม่ถูกอัปโหลดไปที่ไหน</p>
+        <div class="panel-actions">
+          <button id="btnReloadData" class="btn sm ghost" hidden>โหลดข้อมูลใหม่</button>
+          <a id="lnkSheet" class="btn sm ghost" target="_blank" rel="noopener" hidden>แก้ข้อมูลใน Google Sheet</a>
+        </div>
       </div>
       <div id="slots" class="slots"></div>
       <input id="fileInput" type="file" accept=".xls,.xlsx,.csv" multiple hidden>

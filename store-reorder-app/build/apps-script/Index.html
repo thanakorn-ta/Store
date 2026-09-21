@@ -242,6 +242,11 @@ table.grid { border-collapse: separate; border-spacing: 0; width: 100%; font-siz
 @media (max-width: 760px) {
   .submit-grid, .admin-grid { grid-template-columns: 1fr; }
 }
+.panel-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+a.btn { text-decoration: none; display: inline-block; }
+.slot-files .fby { display: block; color: var(--ink-2); font-size: 11px; }
+.slot-note { font-size: 11.5px; color: var(--ink-2); margin-top: auto; }
+.slot.busy { opacity: .6; pointer-events: none; }
 </style>
 
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -268,8 +273,12 @@ table.grid { border-collapse: separate; border-spacing: 0; width: 100%; font-siz
     <!-- 1. Files -->
     <section id="filesPanel" class="panel">
       <div class="panel-head">
-        <h2>1. นำเข้าไฟล์</h2>
-        <p class="hint">ลากไฟล์มาวางตรงไหนก็ได้ ระบบจะดูหัวตารางแล้วจัดเข้าช่องให้เอง · ไฟล์ประมวลผลในเครื่องนี้เท่านั้น ไม่ถูกอัปโหลดไปที่ไหน</p>
+        <h2>1. ข้อมูล Store</h2>
+        <p id="filesHint" class="hint">ลากไฟล์มาวางตรงไหนก็ได้ ระบบจะดูหัวตารางแล้วจัดเข้าช่องให้เอง · ไฟล์ประมวลผลในเครื่องนี้เท่านั้น ไม่ถูกอัปโหลดไปที่ไหน</p>
+        <div class="panel-actions">
+          <button id="btnReloadData" class="btn sm ghost" hidden>โหลดข้อมูลใหม่</button>
+          <a id="lnkSheet" class="btn sm ghost" target="_blank" rel="noopener" hidden>แก้ข้อมูลใน Google Sheet</a>
+        </div>
       </div>
       <div id="slots" class="slots"></div>
       <input id="fileInput" type="file" accept=".xls,.xlsx,.csv" multiple hidden>
@@ -1039,6 +1048,13 @@ async function importFiles(fileList, forcedType = null) {
       }
       const entry = { name: file.name, count: records.length, loadedAt: Date.now(), records };
       const slot = SLOTS.find(s => s.type === type);
+      if (isShared(type)) {
+        // Apps Script: the 4 Store slots are shared data in the database Sheet
+        if (!isAdmin()) { results.push(`✗ ${file.name}: ข้อมูลกลาง — เฉพาะ Admin เพิ่ม/เปลี่ยนไฟล์ได้`); continue; }
+        applyServerData(await gasCall('saveDataFile', type, file.name, records));
+        results.push(`✓ ${file.name} → ${slot.title} (${records.length} แถว) บันทึกลง Google Sheet แล้ว — ทุกคนเห็นข้อมูลนี้`);
+        continue;
+      }
       if (slot.multi) {
         state.files[type] = (state.files[type] || []).filter(f => f.name !== file.name).concat(entry);
       } else {
@@ -1055,25 +1071,72 @@ async function importFiles(fileList, forcedType = null) {
   toast(results.join('\n'));
 }
 
-function removeFile(type, name) {
+async function removeFile(type, name) {
+  if (isShared(type)) {
+    if (!confirm(`นำไฟล์ "${name}" ออกจากข้อมูลกลาง?\nทุกคนจะไม่เห็นข้อมูลจากไฟล์นี้อีก (ลบแถวในชีตด้วย)`)) return;
+    const slotEl = document.querySelector(`[data-slot="${type}"]`);
+    slotEl && slotEl.classList.add('busy');
+    try { applyServerData(await gasCall('removeDataFile', type, name)); toast(`นำ "${name}" ออกแล้ว`); }
+    catch (e) { toast('นำออกไม่สำเร็จ: ' + errMsg(e)); slotEl && slotEl.classList.remove('busy'); }
+    return;
+  }
   state.files[type] = (state.files[type] || []).filter(f => f.name !== name);
   save(); recompute();
 }
 
+// ------------------------------------------------------------ shared data (Apps Script; server: src/DataFiles.js)
+
+const SHARED_SLOTS = ['minmax', 'usage', 'balance', 'reorder'];
+let sharedLoaded = false;
+const isShared = type => GAS && SHARED_SLOTS.includes(type);
+const canEditSlot = type => !isShared(type) || isAdmin();
+
+function applyServerData(data) {
+  for (const t of SHARED_SLOTS) state.files[t] = data.files[t] || [];
+  sharedLoaded = true;
+  if (data.sheetUrl) { $('#lnkSheet').href = data.sheetUrl; $('#lnkSheet').hidden = false; }
+  save();
+  recompute();
+}
+
+async function loadServerData(showToast = false) {
+  const btn = $('#btnReloadData');
+  btn.disabled = true;
+  try {
+    applyServerData(await gasCall('getStoreData'));
+    if (showToast) toast('โหลดข้อมูลล่าสุดจาก Google Sheet แล้ว');
+  } catch (e) {
+    toast('โหลดข้อมูลกลางไม่ได้: ' + errMsg(e));
+  } finally {
+    btn.disabled = false;
+  }
+}
+$('#btnReloadData').addEventListener('click', () => loadServerData(true));
+
 // ------------------------------------------------------------ slots UI
 
 function renderSlots() {
+  if (GAS) {
+    $('#filesHint').textContent = isAdmin()
+      ? 'ข้อมูลกลางเก็บใน Google Sheet — ทุกคนเห็นชุดเดียวกัน · เพิ่ม/เปลี่ยน/นำไฟล์ออกได้ตลอด · แก้รายแถวได้ในชีต data_* แล้วกด "โหลดข้อมูลใหม่" · ช่อง ± เป็นของเครื่องนี้เท่านั้น'
+      : 'ข้อมูลกลางจาก Google Sheet (Admin เป็นผู้อัปเดต) · ช่อง ± ใส่ไฟล์รอบก่อนเพื่อเทียบได้เอง (เก็บในเครื่องนี้)';
+    $('#btnReloadData').hidden = !isMember();
+  }
   $('#slots').innerHTML = SLOTS.map(s => {
     const files = state.files[s.type] || [];
+    const edit = canEditSlot(s.type);
+    const waiting = isShared(s.type) && !sharedLoaded;
     return `<div class="slot ${files.length ? 'filled' : ''}" data-slot="${s.type}">
       <div class="slot-title"><span class="slot-no">${s.no}</span>${esc(s.title)}</div>
       <div class="slot-desc">${esc(s.desc)}</div>
       <ul class="slot-files">${files.map(f => `
-        <li><span class="fname" title="${esc(f.name)}">${esc(f.name)}</span>
+        <li><span class="fname" title="${esc(f.name)}">${esc(f.name)}${f.uploadedAt ? `<span class="fby">${esc(f.uploadedAt)}${f.uploadedBy ? ' · ' + esc(f.uploadedBy.split('@')[0]) : ''}</span>` : ''}</span>
           <span class="fmeta">${fmt(f.count)} แถว</span>
-          <button class="icon-btn" data-remove="${esc(f.name)}" title="นำไฟล์ออก" aria-label="นำไฟล์ออก">×</button></li>`).join('')}
+          ${edit ? `<button class="icon-btn" data-remove="${esc(f.name)}" title="นำไฟล์ออก" aria-label="นำไฟล์ออก">×</button>` : ''}</li>`).join('')}
       </ul>
-      <button class="btn sm ghost slot-add" data-pick="${s.type}">${s.multi && files.length ? 'เพิ่มไฟล์' : files.length ? 'เปลี่ยนไฟล์' : 'เลือกไฟล์'}</button>
+      ${waiting ? '<div class="slot-note">กำลังโหลดข้อมูลกลาง…</div>'
+        : edit ? `<button class="btn sm ghost slot-add" data-pick="${s.type}">${s.multi && files.length ? 'เพิ่มไฟล์' : files.length ? 'เปลี่ยนไฟล์' : 'เลือกไฟล์'}</button>`
+        : `<div class="slot-note">${files.length ? 'อัปเดตโดย Admin' : 'ยังไม่มีข้อมูล — รอ Admin อัปโหลด'}</div>`}
     </div>`;
   }).join('');
 }
@@ -1549,7 +1612,7 @@ function applySession(info) {
   const blocked = GAS && !active;
   $('#filesPanel').hidden = blocked;
   if (blocked) { $('#summary').hidden = true; $('#work').hidden = true; } else recompute();
-  if (active) { if (!isAdmin()) $('#reqFilter').value = ''; refreshBudget(); loadRequests(true); }
+  if (active) { if (!isAdmin()) $('#reqFilter').value = ''; loadServerData(); refreshBudget(); loadRequests(true); }
 }
 
 function renderGate() {
@@ -1829,6 +1892,8 @@ $('#memberAdd').addEventListener('submit', async e => {
 
 // ------------------------------------------------------------ boot
 
+// Apps Script: never show a stale per-browser copy of the shared slots — wait for the server's
+if (GAS) for (const t of SHARED_SLOTS) state.files[t] = [];
 recompute();
 if (GAS) {
   applySession({ status: 'loading' });

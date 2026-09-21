@@ -7,7 +7,8 @@
 | ลิงก์ | `https://<user>.github.io/store-reorder-app/` | `https://script.google.com/.../exec` |
 | ใครเข้าได้ | ตามสิทธิ์ repo/Pages | คนในโดเมน planbmedia (ตาม `appsscript.json`) |
 | ผู้ช่วย AI | ผู้ใช้ใส่ API key เอง (เก็บในเบราว์เซอร์) | ใช้ `ANTHROPIC_API_KEY` ใน Script Properties — ผู้ใช้ไม่เห็น key |
-| บันทึกรายการที่เลือก | ส่งออก .xlsx | ส่งออก .xlsx **+ ปุ่ม "บันทึกลง Google Sheet"** → ต่อท้ายชีต `reorder_queue` (สถานะ "รอส่งอีเมล") ให้ `Notify.js` ส่งอีเมลยืนยันต่อ |
+| ข้อมูล 4 ช่อง | เก็บในเบราว์เซอร์ของแต่ละคน | **ข้อมูลกลางใน Google Sheet** — ทุกคนเห็นชุดเดียวกัน Admin แก้ได้ |
+| สั่งซื้อ | ส่งออก .xlsx | ส่งออก .xlsx **+ ส่งคำขอให้ Admin** (เลือก Budget + เดือน, ระบบสมาชิก) |
 | deploy | `.github/workflows/pages.yml` | `.github/workflows/appsscript.yml` (clasp push) |
 
 แก้โค้ดหน้าเว็บที่ `web/` เท่านั้น แล้วรัน `npm run build` (หรือ
@@ -43,6 +44,17 @@
 > GitHub Pages ของ repo **private** ต้องใช้แพลน GitHub Pro/Team/Enterprise (Enterprise Cloud ตั้งให้เห็นเฉพาะคนในองค์กรได้)
 > ถ้าใช้แพลนฟรีต้องเป็น repo public — ในโค้ดไม่มีข้อมูลสินค้าจริง (ไฟล์ .xls/.xlsx ถูก .gitignore ไว้)
 > แต่ควรย้าย `docs/budget_mapping_draft.md` ออกก่อนถ้าจะเปิด public
+
+### ข้อมูลกลาง (เฉพาะเวอร์ชัน Apps Script)
+
+ข้อมูล 4 ช่อง (MIN/MAX, การใช้ของ, คงเหลือ, จุดสั่งซื้อ) เก็บใน Google Sheet ฐานข้อมูล — ทุกคนเปิดมาเห็นชุดเดียวกัน
+
+- Admin: ลากไฟล์มาวาง / "เปลี่ยนไฟล์" / × นำออก ได้ตลอด (ช่องการใช้ของเก็บได้หลายไฟล์ เช่นทีละเดือน)
+- แก้รายแถวได้โดยตรงในชีต `data_minmax`, `data_usage`, `data_balance`, `data_reorder`
+  (คอลัมน์ A = ไฟล์ที่มา) แล้วกด "โหลดข้อมูลใหม่" ในแอป · ประวัติการอัปโหลดอยู่ในชีต `data_files`
+- User: ดูอย่างเดียว · ช่อง ± (ไฟล์รอบก่อน) ยังเป็นของแต่ละเครื่อง
+- เวอร์ชัน GitHub Pages/Vercel ไม่มี server จึงยังเก็บข้อมูลในเบราว์เซอร์ของแต่ละคนเหมือนเดิม
+  (ไม่ได้ฝังข้อมูลสต๊อก/ราคาไว้ในเว็บสาธารณะ)
 
 ### ระบบสมาชิก + คำขอสั่งซื้อ (เฉพาะเวอร์ชัน Apps Script)
 
@@ -122,7 +134,10 @@ src/
   Notify.js       ส่งอีเมลแจ้ง PC owner + เตือนซ้ำถ้าไม่ตอบใน 3 วัน
   WebApp.js       doGet: ?pc=... → หน้ายืนยัน/แก้จำนวน, ไม่มี → หน้าเทียบยอด (Ui.js)
   confirm.html    หน้า UI ของ WebApp.js
-  Ui.js           เสิร์ฟหน้าเทียบยอดสั่งซื้อ + askClaudeFromUi + saveSelectionToQueue
+  Ui.js           เสิร์ฟหน้าเทียบยอดสั่งซื้อ + askClaudeFromUi
+  DataFiles.js    ข้อมูลกลาง 4 ช่อง (ชีต data_*) อ่าน/เพิ่ม/เปลี่ยน/นำออก
+  Members.js      สมาชิก Admin/User
+  Requests.js     คำขอสั่งซื้อ + Budget
   Index.html, ui_*.html   GENERATED จาก web/ โดย tools/build-appsscript.ps1
   Budget.js       เช็คงบก่อนออก PR/PO (บล็อกจนกว่าจะ mapping เสร็จ)
   Ai.js           เรียก Claude API มาช่วยร่างข้อความ (ไม่ยุ่งกับตัวเลข/อนุมัติ)
