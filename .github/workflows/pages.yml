@@ -1,0 +1,38 @@
+# Publishes store-reorder-app/web/ to GitHub Pages.
+# One-time setup:
+#   1. Settings > Pages > Build and deployment > Source = "GitHub Actions"
+#      (Pages on a private repo needs GitHub Pro/Team/Enterprise)
+#   2. Settings > Secrets and variables > Actions > Variables: ENABLE_PAGES = true
+# Until ENABLE_PAGES is set the job is skipped instead of failing.
+name: Deploy web app to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths: ['store-reorder-app/web/**', '.github/workflows/pages.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    if: vars.ENABLE_PAGES == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: store-reorder-app/web
+      - id: deployment
+        uses: actions/deploy-pages@v4

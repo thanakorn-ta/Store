@@ -19,6 +19,7 @@
         <p class="sub">PG44 Static Media · รวมไฟล์ Store 4 ไฟล์ → เทียบยอดสั่งซื้อ 3 วิธี → เลือกรายการสั่งซื้อ</p>
       </div>
       <div class="top-actions">
+        <span id="whoami" class="who" hidden></span>
         <button id="btnExportAll" class="btn" disabled>ส่งออกไฟล์รวม (.xlsx)</button>
         <button id="btnReset" class="btn ghost">ล้างข้อมูลทั้งหมด</button>
       </div>
@@ -26,8 +27,11 @@
   </header>
 
   <main class="wrap">
+    <!-- Membership gate (Apps Script only) -->
+    <section id="gate" class="panel" hidden></section>
+
     <!-- 1. Files -->
-    <section class="panel">
+    <section id="filesPanel" class="panel">
       <div class="panel-head">
         <h2>1. นำเข้าไฟล์</h2>
         <p class="hint">ลากไฟล์มาวางตรงไหนก็ได้ ระบบจะดูหัวตารางแล้วจัดเข้าช่องให้เอง · ไฟล์ประมวลผลในเครื่องนี้เท่านั้น ไม่ถูกอัปโหลดไปที่ไหน</p>
@@ -61,6 +65,8 @@
         <button class="tab active" data-tab="compare">เทียบยอดสั่งซื้อ</button>
         <button class="tab" data-tab="merged">ตารางรวมทั้งหมด</button>
         <button class="tab" data-tab="cart">รายการที่เลือกสั่ง <span id="cartBadge" class="badge">0</span></button>
+        <button class="tab" data-tab="requests" id="tabRequests" hidden>คำขอสั่งซื้อ <span id="reqBadge" class="badge" hidden>0</span></button>
+        <button class="tab" data-tab="admin" id="tabAdmin" hidden>Admin</button>
         <button class="tab" data-tab="ai">ผู้ช่วย AI</button>
       </nav>
 
@@ -108,12 +114,69 @@
       <div id="tab-cart" class="tabpane" hidden>
         <div class="bulk">
           <button id="btnExportCart" class="btn">ส่งออกใบขอซื้อ (.xlsx)</button>
-          <button id="btnSaveSheet" class="btn" hidden>บันทึกลง Google Sheet</button>
           <button id="btnCopyCart" class="btn ghost">คัดลอกเป็นข้อความ</button>
           <button id="btnClearCart" class="btn ghost">ล้างรายการ</button>
           <span id="cartTotal" class="hint"></span>
         </div>
         <div id="cartBody"></div>
+
+        <div id="submitBox" class="submit-box">
+          <h3>ส่งคำขอสั่งซื้อให้ Admin</h3>
+          <p id="submitHint" class="hint"></p>
+          <div id="submitForm" class="submit-grid">
+            <div class="field">
+              <label for="budgetSearch">1. เลือก Budget</label>
+              <input id="budgetSearch" type="search" placeholder="ค้นหา Location / GL / บริษัท เช่น 530090, Metro, Cookies">
+              <select id="budgetSel" size="7"></select>
+            </div>
+            <div class="field">
+              <label for="monthSel">2. ใช้ของเดือน</label>
+              <select id="monthSel"></select>
+              <div id="budgetInfo" class="budget-info"></div>
+              <label for="reqNote">หมายเหตุถึง Admin</label>
+              <textarea id="reqNote" rows="3" placeholder="เช่น ใช้งานโปรเจกต์…, ต้องการด่วนภายใน…"></textarea>
+              <button id="btnSubmitReq" class="btn">ส่งคำขอให้ Admin</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="tab-requests" class="tabpane" hidden>
+        <div class="bulk">
+          <select id="reqFilter">
+            <option value="รออนุมัติ">รออนุมัติ</option>
+            <option value="อนุมัติ">อนุมัติ</option>
+            <option value="ไม่อนุมัติ">ไม่อนุมัติ</option>
+            <option value="ยกเลิก">ยกเลิก</option>
+            <option value="">ทั้งหมด</option>
+          </select>
+          <button id="btnReloadReq" class="btn sm ghost">โหลดใหม่</button>
+          <span id="reqInfo" class="hint"></span>
+        </div>
+        <div id="reqList"></div>
+      </div>
+
+      <div id="tab-admin" class="tabpane" hidden>
+        <div class="admin-grid">
+          <section>
+            <h3>สมาชิก</h3>
+            <form id="memberAdd" class="inline-form">
+              <input name="email" type="email" placeholder="อีเมล @planbmedia.co.th" required>
+              <input name="name" placeholder="ชื่อ">
+              <select name="role"><option value="user">User</option><option value="admin">Admin</option></select>
+              <button class="btn sm">เพิ่มสมาชิก</button>
+            </form>
+            <div class="table-wrap" style="max-height:none"><table id="tblMembers" class="grid"></table></div>
+          </section>
+          <section>
+            <h3>ข้อมูล Budget</h3>
+            <p id="budgetStatus" class="hint"></p>
+            <button id="btnBudgetFile" class="btn sm">นำเข้าไฟล์ Budget (.xlsx)</button>
+            <input id="budgetFile" type="file" accept=".xlsx,.xls" hidden>
+            <p class="hint">ไฟล์ "Budget STT 2026 - Revise-Budget" · นำเข้าใหม่จะแทนที่ของเดิมทั้งหมด ·
+              งบต่อเดือน = Revise Budget (ถ้ามี) ไม่งั้นใช้ Budget · คงเหลือ = งบ − Actual − คำขอที่รออนุมัติ/อนุมัติแล้ว</p>
+          </section>
+        </div>
       </div>
 
       <div id="tab-ai" class="tabpane" hidden>

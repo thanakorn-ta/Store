@@ -170,8 +170,14 @@ var CONFIG = {
     REORDER_QUEUE: 'reorder_queue',   // รายการที่ต้องสั่ง รอ/ระหว่างยืนยันกับ user
     BUDGET: 'budget_master',          // นำเข้าจากไฟล์ Budget ประจำปี
     PR_LOG: 'pr_po_log',              // บันทึกทุกครั้งที่ออก PR/PO เพื่อหักงบเอง
-    ACTIVITY_LOG: 'activity_log'      // log ทุกขั้นตอนสำหรับ Dashboard
+    ACTIVITY_LOG: 'activity_log',     // log ทุกขั้นตอนสำหรับ Dashboard
+    MEMBERS: 'members',               // สมาชิก: email, name, role (admin/user), status
+    REQUESTS: 'requests',             // คำขอสั่งซื้อจาก user (หัวเอกสาร: งบ, เดือน, สถานะ)
+    REQUEST_ITEMS: 'request_items'    // รายการสินค้าในแต่ละคำขอ
   },
+
+  // Admin ตั้งต้น — เข้าระบบครั้งแรกแล้วได้สิทธิ์ admin อัตโนมัติ (เพิ่มคนอื่นได้ในหน้า Admin)
+  ADMIN_EMAILS: ['thanakorn@planbmedia.co.th'],
 
   // สูตร MIN/MAX (ยืนยันจากไฟล์ MIN_MAX_Calculated.xlsx เดิม)
   // Safety Stock = 0.5 x avg_per_day x lead_time_days
@@ -411,6 +417,183 @@ function logActivity_(step, status, message) {
   var sheet = ss.getSheetByName(CONFIG.SHEETS.ACTIVITY_LOG) || ss.insertSheet(CONFIG.SHEETS.ACTIVITY_LOG);
   if (sheet.getLastRow() === 0) sheet.appendRow(['timestamp', 'step', 'status', 'message']);
   sheet.appendRow([new Date(), step, status, message]);
+}
+
+// ============================================================ Members.js
+/**
+ * Members.js
+ * Membership for the Web App. Identity comes from the Google Workspace login
+ * (Session.getActiveUser) — no separate passwords. This only works when the
+ * Web App is deployed with "Who has access: Anyone within planbmedia.co.th";
+ * with "Anyone" Google does not reveal the viewer's email.
+ *
+ * members sheet: email | name | role (admin/user) | status (active/pending/disabled)
+ *                | created_at | updated_at | updated_by
+ * CONFIG.ADMIN_EMAILS are auto-created as active admins on first visit.
+ */
+
+var MEMBER_HEADER = ['email', 'name', 'role', 'status', 'created_at', 'updated_at', 'updated_by'];
+
+function db_() {
+  return SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+}
+
+/** Returns the sheet, creating it with a header row if missing. */
+function ensureSheet_(ss, name, header) {
+  var sheet = ss.getSheetByName(name);
+  if (!sheet) {
+    sheet = ss.insertSheet(name);
+    sheet.getRange(1, 1, 1, header.length).setValues([header]).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+function activeEmail_() {
+  var email = String(Session.getActiveUser().getEmail() || '').trim().toLowerCase();
+  if (!email) {
+    throw new Error('ระบบอ่านอีเมลผู้ใช้ไม่ได้ — Deploy Web App ต้องตั้ง "ผู้มีสิทธิ์เข้าถึง: ทุกคนใน planbmedia.co.th"');
+  }
+  return email;
+}
+
+/** All member rows as objects with their 1-based sheet row number. */
+function readMembers_(ss) {
+  var sheet = ensureSheet_(ss, CONFIG.SHEETS.MEMBERS, MEMBER_HEADER);
+  var values = sheet.getDataRange().getValues();
+  var out = [];
+  for (var i = 1; i < values.length; i++) {
+    if (!values[i][0]) continue;
+    out.push({
+      row: i + 1,
+      email: String(values[i][0]).trim().toLowerCase(),
+      name: String(values[i][1] || ''),
+      role: String(values[i][2] || 'user'),
+      status: String(values[i][3] || 'pending')
+    });
+  }
+  return out;
+}
+
+/** Current viewer's member record, or {status:'none'} if not registered. */
+function currentMember_() {
+  var email = activeEmail_();
+  var ss = db_();
+  var m = readMembers_(ss).filter(function (x) { return x.email === email; })[0];
+  if (m) return m;
+
+  var bootstrap = CONFIG.ADMIN_EMAILS.map(function (e) { return e.toLowerCase(); }).indexOf(email) !== -1;
+  if (bootstrap) {
+    var now = new Date();
+    var sheet = ensureSheet_(ss, CONFIG.SHEETS.MEMBERS, MEMBER_HEADER);
+    sheet.appendRow([email, email.split('@')[0], 'admin', 'active', now, now, 'bootstrap']);
+    return { email: email, name: email.split('@')[0], role: 'admin', status: 'active', row: sheet.getLastRow() };
+  }
+  return { email: email, name: '', role: '', status: 'none' };
+}
+
+function requireActive_() {
+  var m = currentMember_();
+  if (m.status !== 'active') throw new Error('บัญชีนี้ยังไม่ได้รับอนุมัติให้ใช้งาน');
+  return m;
+}
+
+function requireAdmin_() {
+  var m = requireActive_();
+  if (m.role !== 'admin') throw new Error('เฉพาะ Admin เท่านั้น');
+  return m;
+}
+
+function adminEmails_(ss) {
+  return readMembers_(ss || db_())
+    .filter(function (m) { return m.role === 'admin' && m.status === 'active'; })
+    .map(function (m) { return m.email; });
+}
+
+function webAppUrl_() {
+  try { return ScriptApp.getService().getUrl() || ''; } catch (e) { return ''; }
+}
+
+// ------------------------------------------------------------ called from the page
+
+function getSessionInfo() {
+  var m = currentMember_();
+  return { email: m.email, name: m.name, role: m.role, status: m.status, appUrl: webAppUrl_() };
+}
+
+/** A signed-in but unregistered viewer asks to join; admins get an email. */
+function requestAccess(name) {
+  var email = activeEmail_();
+  name = String(name || '').trim().slice(0, 80);
+  if (!name) throw new Error('กรุณากรอกชื่อ');
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    var ss = db_();
+    if (readMembers_(ss).some(function (m) { return m.email === email; })) return getSessionInfo();
+    var now = new Date();
+    ensureSheet_(ss, CONFIG.SHEETS.MEMBERS, MEMBER_HEADER).appendRow([email, name, 'user', 'pending', now, now, email]);
+    var admins = adminEmails_(ss);
+    if (admins.length) {
+      MailApp.sendEmail({
+        to: admins.join(','),
+        subject: '[Store Reorder] ขอเข้าใช้งาน: ' + name,
+        htmlBody: esc_(name) + ' (' + esc_(email) + ') ขอเข้าใช้งานระบบ<br>' +
+          'อนุมัติได้ที่แท็บ Admin: <a href="' + webAppUrl_() + '">' + webAppUrl_() + '</a>'
+      });
+    }
+  } finally {
+    lock.releaseLock();
+  }
+  return getSessionInfo();
+}
+
+function listMembers() {
+  requireAdmin_();
+  return readMembers_(db_()).map(function (m) {
+    return { email: m.email, name: m.name, role: m.role, status: m.status };
+  });
+}
+
+/** Add or update a member. Admins cannot demote/disable themselves (avoids lock-out). */
+function saveMember(input) {
+  var me = requireAdmin_();
+  var email = String(input.email || '').trim().toLowerCase();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Error('อีเมลไม่ถูกต้อง');
+  var role = input.role === 'admin' ? 'admin' : 'user';
+  var status = ['active', 'pending', 'disabled'].indexOf(input.status) !== -1 ? input.status : 'active';
+  if (email === me.email && (role !== 'admin' || status !== 'active')) {
+    throw new Error('เปลี่ยนสิทธิ์/ระงับบัญชีตัวเองไม่ได้');
+  }
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    var ss = db_();
+    var sheet = ensureSheet_(ss, CONFIG.SHEETS.MEMBERS, MEMBER_HEADER);
+    var now = new Date();
+    var existing = readMembers_(ss).filter(function (m) { return m.email === email; })[0];
+    var name = String(input.name || (existing && existing.name) || email.split('@')[0]).slice(0, 80);
+    if (existing) {
+      sheet.getRange(existing.row, 2, 1, 3).setValues([[name, role, status]]);
+      sheet.getRange(existing.row, 6, 1, 2).setValues([[now, me.email]]);
+      if (existing.status === 'pending' && status === 'active') {
+        MailApp.sendEmail(email, '[Store Reorder] อนุมัติการเข้าใช้งานแล้ว',
+          'บัญชีของคุณได้รับอนุมัติแล้ว เข้าใช้งานได้ที่ ' + webAppUrl_());
+      }
+    } else {
+      sheet.appendRow([email, name, role, status, now, now, me.email]);
+    }
+  } finally {
+    lock.releaseLock();
+  }
+  logActivity_('saveMember', 'ok', me.email + ' -> ' + email + ' ' + role + '/' + status);
+  return listMembers();
+}
+
+function esc_(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
 }
 
 // ============================================================ MinMax.js
@@ -712,6 +895,300 @@ function buildSkuToPcIndex_(ss) {
   return idx;
 }
 
+// ============================================================ Requests.js
+/**
+ * Requests.js
+ * User -> Admin purchase requests. A user picks items + quantities in the
+ * web UI, chooses which budget line (Company x Media Location x GL Code) and
+ * which month the goods will be used, and submits. Admins are emailed and
+ * approve/reject in the "คำขอ" tab. Approved requests are written to
+ * pr_po_log so Budget.js sees them as committed spend.
+ *
+ * Budget comes from the "Budget STT 2026 - Revise-Budget" export, uploaded by
+ * an admin in the Admin tab (parsed in the browser, aggregated per line/month,
+ * stored in budget_master).
+ *   plan      = Revise Budget when filled, else Budget (per source row, summed)
+ *   reserved  = totals of requests still pending or approved for that line/month
+ *   available = plan - actual - reserved
+ */
+
+var BUDGET_HEADER = ['key', 'company', 'division', 'media_type', 'media_group', 'media_location',
+  'expense_group', 'gl_code', 'gl_name', 'year', 'month_number', 'budget', 'revise_budget', 'actual', 'plan'];
+var REQUEST_HEADER = ['request_id', 'created_at', 'requester_email', 'requester_name', 'budget_key',
+  'budget_label', 'budget_year', 'budget_month', 'total', 'item_count', 'available_at_submit', 'over_budget',
+  'status', 'note', 'decided_by', 'decided_at', 'admin_note'];
+var REQUEST_ITEM_HEADER = ['request_id', 'sku', 'name', 'pc_code', 'pc_name', 'unit', 'qty', 'unit_cost',
+  'amount', 'note'];
+var PR_LOG_HEADER = ['created_at', 'request_id', 'pc_code', 'budget_key', 'budget_year', 'month_number', 'amount', 'approved_by'];
+
+var STATUS = { PENDING: 'รออนุมัติ', APPROVED: 'อนุมัติ', REJECTED: 'ไม่อนุมัติ', CANCELLED: 'ยกเลิก' };
+var THAI_MONTH_NAMES = ['', 'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+
+// ------------------------------------------------------------ budget
+
+/** Admin uploads budget rows already aggregated by the page (see web/app.js parseBudgetWorkbook). */
+function importBudget(rows) {
+  var me = requireAdmin_();
+  if (!rows || !rows.length) throw new Error('ไม่พบข้อมูล Budget ในไฟล์');
+  if (rows.length > 20000) throw new Error('ข้อมูล Budget มากเกินไป');
+  var values = rows.map(function (r) {
+    return BUDGET_HEADER.map(function (h) { return r[h] == null ? '' : r[h]; });
+  });
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var ss = db_();
+    var sheet = ensureSheet_(ss, CONFIG.SHEETS.BUDGET, BUDGET_HEADER);
+    sheet.clearContents();
+    sheet.getRange(1, 1, 1, BUDGET_HEADER.length).setValues([BUDGET_HEADER]).setFontWeight('bold');
+    sheet.getRange(2, 1, values.length, BUDGET_HEADER.length).setValues(values);
+  } finally {
+    lock.releaseLock();
+  }
+  logActivity_('importBudget', 'ok', me.email + ' imported ' + rows.length + ' budget rows');
+  return getBudgetOptions();
+}
+
+function budgetLabel_(b) {
+  return [b.media_location, b.gl_code + ' ' + b.gl_name, b.company].filter(String).join(' · ');
+}
+
+/** Budget lines with per-month plan/actual, plus amounts reserved by open requests. */
+function getBudgetOptions() {
+  requireActive_();
+  var ss = db_();
+  var rows = readSheetAsObjects_(ss, CONFIG.SHEETS.BUDGET);
+  var lines = {};
+  var year = 0;
+  rows.forEach(function (b) {
+    if (!b.key) return;
+    var l = lines[b.key];
+    if (!l) {
+      l = lines[b.key] = {
+        key: String(b.key), label: budgetLabel_(b), company: String(b.company),
+        location: String(b.media_location), glCode: String(b.gl_code), glName: String(b.gl_name),
+        expenseGroup: String(b.expense_group), months: {}
+      };
+    }
+    var m = Number(b.month_number);
+    if (!l.months[m]) l.months[m] = { plan: 0, actual: 0 };
+    l.months[m].plan += Number(b.plan) || 0;
+    l.months[m].actual += Number(b.actual) || 0;
+    year = year || Number(b.year) || 0;
+  });
+  return {
+    year: year,
+    lines: Object.keys(lines).map(function (k) { return lines[k]; })
+      .sort(function (a, b) { return a.label.localeCompare(b.label); }),
+    reserved: reservedByBudget_(ss)
+  };
+}
+
+/** { "key|month": amount } for requests that are pending or approved. */
+function reservedByBudget_(ss) {
+  var out = {};
+  readSheetAsObjects_(ss, CONFIG.SHEETS.REQUESTS).forEach(function (r) {
+    if (r.status !== STATUS.PENDING && r.status !== STATUS.APPROVED) return;
+    var k = r.budget_key + '|' + Number(r.budget_month);
+    out[k] = (out[k] || 0) + (Number(r.total) || 0);
+  });
+  return out;
+}
+
+// ------------------------------------------------------------ user: submit / list / cancel
+
+/**
+ * payload: { budgetKey, month, note, items: [{ sku, name, pc, pcName, unit, qty, unitCost, note }] }
+ * Over-budget requests are accepted but flagged so the admin decides.
+ */
+function submitOrderRequest(payload) {
+  var me = requireActive_();
+  var items = (payload && payload.items || []).filter(function (i) { return Number(i.qty) > 0; });
+  if (!items.length) throw new Error('ยังไม่มีรายการที่จำนวนมากกว่า 0');
+  if (items.length > 500) throw new Error('รายการมากเกินไป (สูงสุด 500)');
+  var month = Number(payload.month);
+  if (!(month >= 1 && month <= 12)) throw new Error('กรุณาเลือกเดือนที่จะใช้ของ');
+
+  var opts = getBudgetOptions();
+  var line = opts.lines.filter(function (l) { return l.key === payload.budgetKey; })[0];
+  if (!line) throw new Error('กรุณาเลือก Budget');
+
+  var total = 0;
+  var itemRows = items.map(function (i) {
+    var qty = Math.round(Number(i.qty));
+    var cost = Math.max(0, Number(i.unitCost) || 0);
+    var amount = Math.round(qty * cost * 100) / 100;
+    total += amount;
+    return [null, String(i.sku), String(i.name || '').slice(0, 200), String(i.pc || ''), String(i.pcName || ''),
+      String(i.unit || ''), qty, cost, amount, String(i.note || '').slice(0, 300)];
+  });
+  total = Math.round(total * 100) / 100;
+
+  var mb = line.months[month] || { plan: 0, actual: 0 };
+  var available = mb.plan - mb.actual - (opts.reserved[line.key + '|' + month] || 0);
+  var over = total > available;
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  var id;
+  try {
+    var ss = db_();
+    var reqSheet = ensureSheet_(ss, CONFIG.SHEETS.REQUESTS, REQUEST_HEADER);
+    var itemSheet = ensureSheet_(ss, CONFIG.SHEETS.REQUEST_ITEMS, REQUEST_ITEM_HEADER);
+    id = 'REQ-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyMMdd') + '-' +
+      ('000' + reqSheet.getLastRow()).slice(-4);
+    reqSheet.appendRow([id, new Date(), me.email, me.name, line.key, line.label, opts.year, month, total,
+      itemRows.length, Math.round(available * 100) / 100, over ? 'เกินงบ' : '', STATUS.PENDING,
+      String(payload.note || '').slice(0, 500), '', '', '']);
+    itemRows.forEach(function (r) { r[0] = id; });
+    itemSheet.getRange(itemSheet.getLastRow() + 1, 1, itemRows.length, REQUEST_ITEM_HEADER.length).setValues(itemRows);
+  } finally {
+    lock.releaseLock();
+  }
+
+  notifyAdminsNewRequest_(id, me, line, month, total, available, items);
+  logActivity_('submitOrderRequest', 'ok', id + ' by ' + me.email + ' total ' + total);
+  return { id: id, total: total, available: available, overBudget: over };
+}
+
+function listMyRequests() {
+  var me = requireActive_();
+  return loadRequests_(function (r) { return r.requester_email === me.email; });
+}
+
+function cancelMyRequest(id) {
+  var me = requireActive_();
+  return updateRequestStatus_(id, function (r) {
+    if (r.requester_email !== me.email) throw new Error('ยกเลิกได้เฉพาะคำขอของตัวเอง');
+    if (r.status !== STATUS.PENDING) throw new Error('ยกเลิกได้เฉพาะคำขอที่รออนุมัติ');
+    return { status: STATUS.CANCELLED, decided_by: me.email, admin_note: 'ผู้ขอยกเลิกเอง' };
+  });
+}
+
+// ------------------------------------------------------------ admin
+
+function listAllRequests(status) {
+  requireAdmin_();
+  return loadRequests_(function (r) { return !status || r.status === status; });
+}
+
+/** decision: 'approve' | 'reject' */
+function decideRequest(id, decision, note) {
+  var me = requireAdmin_();
+  var approve = decision === 'approve';
+  var result = updateRequestStatus_(id, function (r) {
+    if (r.status !== STATUS.PENDING) throw new Error('คำขอนี้ถูกดำเนินการไปแล้ว (' + r.status + ')');
+    return { status: approve ? STATUS.APPROVED : STATUS.REJECTED, decided_by: me.email,
+      admin_note: String(note || '').slice(0, 500) };
+  });
+  var req = result.request;
+
+  if (approve) {
+    // Committed spend per PC for Budget.js (checkBudget_) — one row per PC in the request
+    var byPc = {};
+    req.items.forEach(function (i) { byPc[i.pc_code] = (byPc[i.pc_code] || 0) + Number(i.amount); });
+    var log = ensureSheet_(db_(), CONFIG.SHEETS.PR_LOG, PR_LOG_HEADER);
+    Object.keys(byPc).forEach(function (pc) {
+      log.appendRow([new Date(), req.request_id, pc, req.budget_key, req.budget_year, req.budget_month,
+        Math.round(byPc[pc] * 100) / 100, me.email]);
+    });
+  }
+
+  MailApp.sendEmail({
+    to: req.requester_email,
+    subject: '[Store Reorder] ' + req.request_id + ' ' + req.status,
+    htmlBody: 'คำขอ ' + esc_(req.request_id) + ' (' + fmtMoney_(req.total) + ' บาท) : <b>' + esc_(req.status) + '</b>' +
+      (req.admin_note ? '<br>หมายเหตุจาก Admin: ' + esc_(req.admin_note) : '') +
+      '<br><a href="' + webAppUrl_() + '">เปิดระบบ</a>'
+  });
+  logActivity_('decideRequest', 'ok', id + ' ' + req.status + ' by ' + me.email);
+  return listAllRequests();
+}
+
+// ------------------------------------------------------------ helpers
+
+function loadRequests_(filterFn) {
+  var ss = db_();
+  var items = {};
+  readSheetAsObjects_(ss, CONFIG.SHEETS.REQUEST_ITEMS).forEach(function (i) {
+    (items[i.request_id] = items[i.request_id] || []).push({
+      sku: i.sku, name: i.name, pc_code: i.pc_code, pc_name: i.pc_name, unit: i.unit,
+      qty: Number(i.qty), unit_cost: Number(i.unit_cost), amount: Number(i.amount), note: i.note
+    });
+  });
+  return readSheetAsObjects_(ss, CONFIG.SHEETS.REQUESTS)
+    .filter(function (r) { return r.request_id && filterFn(r); })
+    .map(function (r) { return toClientRequest_(r, items[r.request_id] || []); })
+    .reverse()
+    .slice(0, 300);
+}
+
+/** google.script.run can't return Date objects — convert to strings. */
+function toClientRequest_(r, items) {
+  var out = {};
+  REQUEST_HEADER.forEach(function (h) {
+    var v = r[h];
+    out[h] = v instanceof Date ? Utilities.formatDate(v, 'Asia/Bangkok', 'yyyy-MM-dd HH:mm') : v;
+  });
+  out.month_label = THAI_MONTH_NAMES[Number(r.budget_month)] + ' ' + (Number(r.budget_year) ? Number(r.budget_year) : '');
+  out.items = items;
+  return out;
+}
+
+function updateRequestStatus_(id, mutate) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var ss = db_();
+    var sheet = ensureSheet_(ss, CONFIG.SHEETS.REQUESTS, REQUEST_HEADER);
+    var values = sheet.getDataRange().getValues();
+    var col = {};
+    values[0].forEach(function (h, i) { col[h] = i; });
+    for (var r = 1; r < values.length; r++) {
+      if (values[r][col.request_id] !== id) continue;
+      var obj = {};
+      REQUEST_HEADER.forEach(function (h) { obj[h] = values[r][col[h]]; });
+      var change = mutate(obj);
+      change.decided_at = new Date();
+      Object.keys(change).forEach(function (k) {
+        sheet.getRange(r + 1, col[k] + 1).setValue(change[k]);
+        obj[k] = change[k];
+      });
+      var items = readSheetAsObjects_(ss, CONFIG.SHEETS.REQUEST_ITEMS).filter(function (i) { return i.request_id === id; });
+      return { request: toClientRequest_(obj, items) };
+    }
+    throw new Error('ไม่พบคำขอ ' + id);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function notifyAdminsNewRequest_(id, me, line, month, total, available, items) {
+  var admins = adminEmails_();
+  if (!admins.length) return;
+  var rows = items.map(function (i) {
+    return '<tr><td>' + esc_(i.pc) + '</td><td>' + esc_(i.sku) + '</td><td>' + esc_(i.name) + '</td><td align="right">' +
+      esc_(i.qty) + ' ' + esc_(i.unit) + '</td><td align="right">' + fmtMoney_(Number(i.qty) * (Number(i.unitCost) || 0)) + '</td></tr>';
+  }).join('');
+  MailApp.sendEmail({
+    to: admins.join(','),
+    subject: '[Store Reorder] คำขอสั่งซื้อใหม่ ' + id + ' จาก ' + (me.name || me.email) +
+      (total > available ? ' (เกินงบ)' : ''),
+    htmlBody:
+      '<p><b>' + esc_(id) + '</b> โดย ' + esc_(me.name) + ' (' + esc_(me.email) + ')</p>' +
+      '<p>Budget: ' + esc_(line.label) + '<br>ใช้เดือน: ' + THAI_MONTH_NAMES[month] +
+      '<br>ยอดรวม: <b>' + fmtMoney_(total) + '</b> บาท · งบคงเหลือก่อนคำขอนี้: ' + fmtMoney_(available) + ' บาท' +
+      (total > available ? ' <b style="color:#b23b2e">เกินงบ ' + fmtMoney_(total - available) + ' บาท</b>' : '') + '</p>' +
+      '<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse">' +
+      '<tr><th>PC</th><th>รหัส</th><th>สินค้า</th><th>จำนวน</th><th>บาท</th></tr>' + rows + '</table>' +
+      '<p><a href="' + webAppUrl_() + '">เปิดระบบเพื่ออนุมัติ</a></p>'
+  });
+}
+
+function fmtMoney_(n) {
+  return (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 // ============================================================ Ui.js
 /**
  * Ui.js
@@ -744,44 +1221,6 @@ function askClaudeFromUi(system, userContent) {
   return callClaude_(system, userContent, 4000);
 }
 
-/**
- * Called from the cart's "บันทึกลง Google Sheet". Appends the selected lines
- * to reorder_queue with status "รอส่งอีเมล", so the existing Notify.js /
- * confirm-page flow picks them up exactly like auto-queued items.
- * rows: objects produced by cartSheetRows() in web/app.js (Thai keys).
- */
-function saveSelectionToQueue(rows) {
-  if (!rows || !rows.length) throw new Error('ไม่มีรายการ');
-  if (!CONFIG.SPREADSHEET_ID || CONFIG.SPREADSHEET_ID === 'PUT_SPREADSHEET_ID_HERE') {
-    throw new Error('ยังไม่ได้ตั้ง CONFIG.SPREADSHEET_ID ใน Config.js');
-  }
-  var ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
-  var pcByCode = {};
-  readSheetAsObjects_(ss, CONFIG.SHEETS.MASTER_PC).forEach(function (p) { pcByCode[p.pc_code] = p; });
-
-  var header = ['created_at', 'sku', 'name', 'pc_code', 'pc_name', 'owner_email',
-    'manager_email', 'balance', 'min', 'max', 'suggested_qty', 'unit_cost',
-    'suggested_value', 'status', 'confirmed_qty', 'confirmed_at'];
-  var sheet = ss.getSheetByName(CONFIG.SHEETS.REORDER_QUEUE) || ss.insertSheet(CONFIG.SHEETS.REORDER_QUEUE);
-  if (sheet.getLastRow() === 0) sheet.getRange(1, 1, 1, header.length).setValues([header]);
-
-  var now = new Date();
-  var out = rows
-    .filter(function (r) { return Number(r['จำนวนสั่ง']) > 0; })
-    .map(function (r) {
-      var pc = pcByCode[r['PC']] || {};
-      var qty = Number(r['จำนวนสั่ง']);
-      var cost = Number(r['ราคา/หน่วย']) || 0;
-      return [now, r['รหัสสินค้า'], r['สินค้า'], r['PC'] || '', pc.pc_name || r['ชื่อ PC'] || '',
-        pc.owner_email || '', pc.manager_email || '',
-        Number(r['คงเหลือ']) || 0, '', '', qty, cost, round1_(qty * cost),
-        'รอส่งอีเมล', '', ''];
-    });
-  if (out.length) sheet.getRange(sheet.getLastRow() + 1, 1, out.length, header.length).setValues(out);
-
-  logActivity_('saveSelectionToQueue', 'ok', out.length + ' items from web UI by ' + Session.getActiveUser().getEmail());
-  return { count: out.length };
-}
 
 // ============================================================ WebApp.js
 /**

@@ -44,6 +44,27 @@
 > ถ้าใช้แพลนฟรีต้องเป็น repo public — ในโค้ดไม่มีข้อมูลสินค้าจริง (ไฟล์ .xls/.xlsx ถูก .gitignore ไว้)
 > แต่ควรย้าย `docs/budget_mapping_draft.md` ออกก่อนถ้าจะเปิด public
 
+### ระบบสมาชิก + คำขอสั่งซื้อ (เฉพาะเวอร์ชัน Apps Script)
+
+ยืนยันตัวตนด้วยบัญชี Google ของบริษัท (ไม่มีรหัสผ่านแยก) — **ต้อง Deploy แบบ
+"Execute as: Me" + "Who has access: Anyone within planbmedia.co.th"** ถ้าตั้งเป็น "Anyone"
+ระบบจะอ่านอีเมลผู้ใช้ไม่ได้และเข้าใช้งานไม่ได้
+
+| บทบาท | ทำอะไรได้ |
+|---|---|
+| ผู้ใช้ใหม่ | เปิดลิงก์ → กรอกชื่อ "ขอเข้าใช้งาน" → Admin ได้อีเมล |
+| User | เทียบยอด/เลือกรายการ+จำนวน → **เลือก Budget + เดือนที่จะใช้ของ** → ส่งคำขอให้ Admin · ดู/ยกเลิกคำขอของตัวเอง |
+| Admin | ทุกอย่างของ User + อนุมัติ/ไม่อนุมัติคำขอ (แจ้งผู้ขอทางอีเมล) · จัดการสมาชิก (อนุมัติ/เปลี่ยนสิทธิ์/ระงับ) · นำเข้าไฟล์ Budget |
+
+- Admin ตั้งต้น: `CONFIG.ADMIN_EMAILS` ใน `src/Config.js` (เข้าครั้งแรกได้สิทธิ์ Admin อัตโนมัติ)
+- Budget: Admin นำเข้าไฟล์ "Budget STT 2026 - Revise-Budget" ที่แท็บ Admin (หรือลากไฟล์มาวาง) —
+  รวมเป็น Budget ต่อ บริษัท × Media Location × GL Code × เดือน · ถ้าช่อง Media Location ว่าง
+  ใช้ชื่อจากคอลัมน์ Calculation · แถวที่ไม่มี GL Code/เลขเดือนจะถูกข้ามและแจ้งจำนวน
+- คงเหลือ = งบเดือนนั้น (Revise Budget ถ้ามี ไม่งั้น Budget) − Actual − คำขอที่รออนุมัติ/อนุมัติแล้ว ·
+  ส่งเกินงบได้แต่จะติดป้าย "เกินงบ" ให้ Admin ตัดสินใจ
+- ชีตในฐานข้อมูล: `members`, `requests`, `request_items`, `budget_master`; คำขอที่อนุมัติแล้วบันทึกลง
+  `pr_po_log` แยกตาม PC (ใช้ต่อใน `Budget.js`)
+
 ### เปิดใช้บน Apps Script
 
 ฐานข้อมูล: [Google Sheet](https://docs.google.com/spreadsheets/d/1V91agWVoocDbJ54KLxAN27btFaYvEewR10NHsA3TVSY/edit)

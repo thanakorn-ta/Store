@@ -20,8 +20,14 @@ var CONFIG = {
     REORDER_QUEUE: 'reorder_queue',   // รายการที่ต้องสั่ง รอ/ระหว่างยืนยันกับ user
     BUDGET: 'budget_master',          // นำเข้าจากไฟล์ Budget ประจำปี
     PR_LOG: 'pr_po_log',              // บันทึกทุกครั้งที่ออก PR/PO เพื่อหักงบเอง
-    ACTIVITY_LOG: 'activity_log'      // log ทุกขั้นตอนสำหรับ Dashboard
+    ACTIVITY_LOG: 'activity_log',     // log ทุกขั้นตอนสำหรับ Dashboard
+    MEMBERS: 'members',               // สมาชิก: email, name, role (admin/user), status
+    REQUESTS: 'requests',             // คำขอสั่งซื้อจาก user (หัวเอกสาร: งบ, เดือน, สถานะ)
+    REQUEST_ITEMS: 'request_items'    // รายการสินค้าในแต่ละคำขอ
   },
+
+  // Admin ตั้งต้น — เข้าระบบครั้งแรกแล้วได้สิทธิ์ admin อัตโนมัติ (เพิ่มคนอื่นได้ในหน้า Admin)
+  ADMIN_EMAILS: ['thanakorn@planbmedia.co.th'],
 
   // สูตร MIN/MAX (ยืนยันจากไฟล์ MIN_MAX_Calculated.xlsx เดิม)
   // Safety Stock = 0.5 x avg_per_day x lead_time_days

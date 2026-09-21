@@ -1,0 +1,76 @@
+# Rebuilds the Apps Script copy of store-reorder-app/web/ and pushes src/ to Apps Script.
+#
+# Repo secrets (Settings > Secrets and variables > Actions):
+#   CLASPRC_JSON   content of ~/.clasprc.json after `clasp login` (required to push)
+#   SCRIPT_ID      Apps Script project ID (Sheet > Extensions > Apps Script > Project Settings)
+#   DEPLOYMENT_ID  optional: Web App deployment ID to update so the /exec URL stays the same
+# Without CLASPRC_JSON the job only builds (and uploads the copy-paste bundle as an artifact).
+name: Build & push Apps Script
+
+on:
+  push:
+    branches: [main]
+    paths: ['store-reorder-app/web/**', 'store-reorder-app/src/**', 'store-reorder-app/tools/**', '.github/workflows/appsscript.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: appsscript
+  cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: store-reorder-app
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    env:
+      CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+      SCRIPT_ID: ${{ secrets.SCRIPT_ID }}
+      DEPLOYMENT_ID: ${{ secrets.DEPLOYMENT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build src/ + build/apps-script/ from web/
+        shell: pwsh
+        run: ./tools/build-appsscript.ps1
+
+      - name: Check committed build is up to date
+        run: |
+          if ! git diff --quiet -- src/ build/apps-script/; then
+            echo "::warning::Generated files were out of date in the commit. Run tools/build-appsscript.ps1 locally and commit."
+            git diff --stat -- src/ build/apps-script/
+          fi
+
+      - name: Upload copy-paste bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: apps-script-bundle
+          path: store-reorder-app/build/apps-script/
+
+      - uses: actions/setup-node@v4
+        if: env.CLASPRC_JSON != ''
+        with:
+          node-version: 20
+
+      - name: clasp push
+        if: env.CLASPRC_JSON != ''
+        run: |
+          npm install -g @google/clasp@2.4.2
+          printf '%s' "$CLASPRC_JSON" > ~/.clasprc.json
+          if [ ! -f .clasp.json ]; then
+            if [ -z "$SCRIPT_ID" ]; then echo "::error::No .clasp.json and no SCRIPT_ID secret"; exit 1; fi
+            printf '{"scriptId":"%s","rootDir":"src"}' "$SCRIPT_ID" > .clasp.json
+          fi
+          clasp push --force
+
+      - name: Update Web App deployment
+        if: env.CLASPRC_JSON != '' && env.DEPLOYMENT_ID != ''
+        run: clasp deploy --deploymentId "$DEPLOYMENT_ID" --description "GitHub ${GITHUB_SHA::7}"
+
+      - name: Skip notice
+        if: env.CLASPRC_JSON == ''
+        run: echo "::notice::CLASPRC_JSON secret not set - built only, did not push to Apps Script."

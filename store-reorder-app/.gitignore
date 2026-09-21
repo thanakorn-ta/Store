@@ -1,0 +1,8 @@
+node_modules/
+.clasprc.json
+*.xls
+*.xlsx
+*.csv
+.env
+build/*
+!build/apps-script/

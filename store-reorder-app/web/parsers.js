@@ -87,6 +87,7 @@ function groupLabel(row, skipIdx = -1) {
 
 function detectType(rows, fileName = '') {
   const head = rows.slice(0, 40).map(r => r.map(str).join('|')).join('\n');
+  if (/Media Location/.test(head) && /GL Code/.test(head)) return 'budget';
   if (/ต้องซื้ออย่างน้อย|จุดต่ำสุด|ถึงจุดสั่งซื้อ/.test(head)) return 'reorder';
   if (/Avg\/month/i.test(head) || (/\bMIN\b/.test(head) && /\bMAX\b/.test(head))) return 'minmax';
   if (/จำนวนใช้|รายงานการใช้/.test(head) || /การใช้งานเดือน|รวมการใช้/.test(fileName)) return 'usage';
@@ -246,5 +247,62 @@ function parseMergedExport(rows) {
       avgActual: num(rows[r][idx('เฉลี่ยใช้จริง/เดือน')])
     });
   }
+  return out;
+}
+
+// ---------------------------------------------------------------- budget
+
+/**
+ * "Budget STT 2026 - Revise-Budget" export: one row per Calculation x Month.
+ * Aggregated here to one row per (Company x Media Location x GL Code) x month
+ * so the Apps Script side stores a compact budget_master.
+ *   plan = Revise Budget when filled, else Budget (decided per source row)
+ * Field names match BUDGET_HEADER in src/Requests.js.
+ */
+function parseBudget(rows) {
+  const h = findHeader(rows, ['Media Location', 'GL Code']);
+  if (h < 0) throw new Error('ไม่พบหัวตาราง Media Location / GL Code ในไฟล์ Budget');
+  const col = mapColumns(rows[h], {
+    calc: ['Calculation'], company: ['Company'], division: ['Division'], mediaType: ['Media Type'], mediaGroup: ['Media Group'],
+    location: ['Media Location'], expenseGroup: ['Expense Group'], gl: ['GL Code'],
+    glName: [/^ประเภทของค่าใช้จ่าย/], year: ['Year'], month: ['Month Number'],
+    budget: ['Budget'], revise: ['Revise Budget'], actual: ['Actual']
+  });
+  const lines = new Map();
+  let skipped = 0;
+  for (let r = h + 1; r < rows.length; r++) {
+    const row = rows[r];
+    const gl = str(row[col.gl]), month = num(row[col.month]);
+    const hasData = num(row[col.budget]) || num(row[col.actual]) || num(row[col.revise]);
+    // Media Location is blank on ~25% of rows; the Calculation column always carries it:
+    // "Electricity / Cookies - Operation Costs" -> "Cookies"
+    const calcLoc = (str(row[col.calc]).match(/\/\s*(.+?)\s+-\s+[^-]+$/) || [])[1] || '';
+    const location = str(row[col.location]) || calcLoc || str(row[col.mediaGroup]);
+    if (!gl || !location || !(month >= 1 && month <= 12)) { if (hasData) skipped++; continue; }
+    const company = str(row[col.company]);
+    const key = `${company}|${location}|${gl}`;
+    const k = key + '|' + month;
+    if (!lines.has(k)) {
+      lines.set(k, {
+        key, company, division: str(row[col.division]), media_type: str(row[col.mediaType]),
+        media_group: str(row[col.mediaGroup]), media_location: location,
+        expense_group: str(row[col.expenseGroup]), gl_code: gl, gl_name: str(row[col.glName]),
+        year: num(row[col.year]), month_number: month, budget: 0, revise_budget: 0, actual: 0, plan: 0
+      });
+    }
+    const l = lines.get(k);
+    const budget = num(row[col.budget]);
+    const reviseCell = str(row[col.revise]);
+    const revise = num(row[col.revise]);
+    l.budget += budget;
+    l.revise_budget += revise;
+    l.actual += num(row[col.actual]);
+    l.plan += reviseCell !== '' ? revise : budget;
+  }
+  const round = n => Math.round(n * 100) / 100;
+  const out = [...lines.values()].map(l => ({
+    ...l, budget: round(l.budget), revise_budget: round(l.revise_budget), actual: round(l.actual), plan: round(l.plan)
+  }));
+  out.skipped = skipped; // rows with amounts but no GL Code / month — reported to the admin
   return out;
 }
