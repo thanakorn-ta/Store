@@ -10,7 +10,12 @@
  */
 
 function renderReorderUi_() {
-  return HtmlService.createTemplateFromFile('Index').evaluate()
+  // The copy-paste bundle (build/apps-script/Code.gs) embeds the page as INDEX_HTML_,
+  // so pasting that one file is enough; clasp deployments use the Index.html file instead.
+  var page = typeof INDEX_HTML_ === 'string'
+    ? HtmlService.createHtmlOutput(INDEX_HTML_)
+    : HtmlService.createTemplateFromFile('Index').evaluate();
+  return page
     .setTitle('Store Reorder AI')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
 }

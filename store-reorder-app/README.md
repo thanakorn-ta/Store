@@ -103,10 +103,15 @@ User ยังส่งคำขอเองจากตะกร้าได้
 ฐานข้อมูล: [Google Sheet](https://docs.google.com/spreadsheets/d/1V91agWVoocDbJ54KLxAN27btFaYvEewR10NHsA3TVSY/edit)
 (ตั้งไว้แล้วใน `src/Config.js`) — ระบบสร้างชีตของตัวเอง (`raw_*`, `reorder_queue`, `activity_log` …) ไม่ทับชีตเดิม
 
-**แบบ A — คัดลอกวาง (ไม่ต้องติดตั้งอะไร)**: รัน `tools/build-appsscript.ps1` แล้วเอา 4 ไฟล์ใน
-`build/apps-script/` ไปวางใน Sheet > Extensions > Apps Script
-(`Code.gs`, `Index.html`, `confirm.html`, และ `appsscript.json` — เปิดให้เห็นก่อนที่ Project Settings >
-"Show appsscript.json manifest file in editor")
+**แบบ A — คัดลอกวาง 1 ไฟล์ (ไม่ต้องติดตั้งอะไร)** — ใช้ `build/apps-script/Code.gs` (รวมโค้ดทุกไฟล์ + หน้าเว็บไว้แล้ว):
+
+1. Sheet > ส่วนขยาย > Apps Script → **ลบไฟล์อื่นทั้งหมด** (.gs / .html เก่า — ไฟล์เก่าที่ชื่อฟังก์ชันซ้ำจะทับของใหม่)
+2. วาง `Code.gs` ทั้งไฟล์ → 💾
+3. การตั้งค่าโปรเจกต์ > ติ๊ก "แสดงไฟล์ appsscript.json" → วาง `build/apps-script/appsscript.json` ลงไฟล์นั้น (ห้ามวางเป็น .gs)
+4. เลือกฟังก์ชัน **`setup`** → เรียกใช้ → อนุญาตสิทธิ์ → ดูบันทึก: ทุกบรรทัดต้องเป็น ✓
+5. Deploy (Execute as: Me · Who has access: Anyone) → เปิดลิงก์ → เข้า `admin` / `admin2026`
+
+ฟังก์ชันอื่น (`login`, `importBudget` ฯลฯ) กด Run ใน editor ไม่ได้ — ต้องเรียกจากหน้าเว็บหลังเข้าสู่ระบบ (จะขึ้น "กรุณาเข้าสู่ระบบ" ซึ่งเป็นปกติ)
 
 **แบบ B — clasp** (ต้องมี Node.js):
 
@@ -160,6 +165,7 @@ src/
   Members.js      สมาชิก Admin/User แบบ ID + รหัสผ่าน (hash), session token
   Api.js          ทางเข้าเดียวของหน้าเว็บ: api(token, fn, args) + doPost สำหรับหน้า GitHub/Vercel
   SheetUtil.js    ตัวช่วยอ่าน/เขียนชีต + ownerOnly_
+  Setup.js        setup(): รันใน editor เพื่อขอสิทธิ์และตรวจการติดตั้ง (✓/✗)
   Requests.js     workflow คำขอ: ส่ง PC → ยืนยัน → ตรวจงบ/เกินงบ → PR/PO → รับของ + Budget + เตือนซ้ำ
   MasterPc.js     PC → อีเมลผู้รับผิดชอบ / หัวหน้า / Budget ตั้งต้น
   Index.html, ui_*.html   GENERATED จาก web/ โดย tools/build-appsscript.ps1
