@@ -28,7 +28,7 @@ let state = load() || { files: {}, opt: { ...DEFAULTS }, cart: {}, qtySource: 'a
 state.opt = { ...DEFAULTS, ...state.opt };
 let merged = { rows: [], months: [] };
 let bySku = new Map();
-let activeTab = 'compare';
+let activeTab = 'home';
 let pendingSlot = null;
 
 // ------------------------------------------------------------ persistence
@@ -278,13 +278,14 @@ function recompute() {
     minmax: f('minmax'), usage: f('usage'), balance: f('balance'), reorder: f('reorder'), baseline: f('baseline')
   }, state.opt);
   bySku = new Map(merged.rows.map(r => [r.sku, r]));
-  // drop cart items whose SKU vanished after a file was removed
-  for (const sku of Object.keys(state.cart)) if (!bySku.has(sku)) delete state.cart[sku];
+  // drop cart items whose SKU vanished after a file was removed — but not before the
+  // shared data has arrived from the server, or every reload would empty the basket
+  if (!SERVER || sharedLoaded) for (const sku of Object.keys(state.cart)) if (!bySku.has(sku)) delete state.cart[sku];
 
   renderSlots();
   const has = merged.rows.length > 0;
   $('#summary').hidden = !has;
-  $('#work').hidden = !has && !isMember();
+  $('#work').hidden = SERVER && !isMember();
   $('#btnExportAll').disabled = !has;
   if (!has) { renderActive(); return; }
   renderSettings();
@@ -322,7 +323,30 @@ function renderCards() {
     <div class="card"><div class="k">เลือกสั่งแล้ว</div><div class="v">${fmt(Object.keys(state.cart).length)}</div>
       <div class="s">ประมาณ ${money(cartVal)}</div></div>
     ${missing.length ? `<div class="card"><div class="k">ยังไม่ได้นำเข้า</div><div class="s" style="color:var(--warn)">${missing.map(esc).join('<br>')}</div></div>` : ''}`;
-  $('#cartBadge').textContent = Object.keys(state.cart).length;
+  updateCartBar();
+}
+
+// ------------------------------------------------------------ sticky basket (always shows the next step)
+
+function cartTotals() {
+  let n = 0, v = 0;
+  for (const [sku, c] of Object.entries(state.cart)) { n++; v += c.qty * (bySku.get(sku)?.cost || 0); }
+  return { n, v };
+}
+
+function updateCartBar() {
+  const { n, v } = cartTotals();
+  $('#cartBadge').textContent = n;
+  const show = n > 0 && ['compare', 'merged', 'home'].includes(activeTab) && !$('#work').hidden;
+  $('#cartBar').hidden = !show;
+  document.body.classList.toggle('has-cartbar', show);
+  $('#cartBarText').innerHTML = `เลือกแล้ว <b>${fmt(n)}</b> รายการ · ประมาณ <b>${money(v)}</b>`;
+}
+$('#cartBarBtn').addEventListener('click', () => goTab('cart'));
+
+function goTab(name) {
+  const t = document.querySelector(`.tab[data-tab="${name}"]`);
+  if (t && !t.hidden) t.click();
 }
 
 function renderPcFilter() {
@@ -356,7 +380,7 @@ function filtered(mode) {
 }
 ['#fSearch', '#fPc', '#fCat', '#fShow'].forEach(s => $(s).addEventListener('input', () => renderActive()));
 $('#qtySource').value = state.qtySource;
-$('#qtySource').addEventListener('change', e => { state.qtySource = e.target.value; save(); });
+$('#qtySource').addEventListener('change', e => { state.qtySource = e.target.value; save(); renderActive(); });
 
 // ------------------------------------------------------------ tabs
 
@@ -365,11 +389,17 @@ document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () =>
   document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === t));
   document.querySelectorAll('.tabpane').forEach(p => (p.hidden = p.id !== 'tab-' + activeTab));
   $('#filters').hidden = !['compare', 'merged'].includes(activeTab);
+  // filters sit above the table of the active view
+  const pane = $('#tab-' + activeTab);
+  if (!$('#filters').hidden) pane.querySelector('.page-head').after($('#filters'));
+  window.scrollTo(0, 0);
+  updateCartBar();
   renderActive();
 }));
 
 function renderActive() {
-  if (activeTab === 'compare') renderCompare();
+  if (activeTab === 'home') renderHome();
+  else if (activeTab === 'compare') renderCompare();
   else if (activeTab === 'merged') renderMerged();
   else if (activeTab === 'cart') { renderCart(); renderSubmitBox(); }
   else if (activeTab === 'requests') loadRequests();
@@ -398,6 +428,8 @@ function renderCompare() {
     $('#tblCompare').innerHTML = `<tbody><tr><td class="empty">${msg}</td></tr></tbody>`;
     return;
   }
+  document.body.classList.toggle('detail-mode', !!state.detail);
+  if (!state.detail) { renderCompareSimple(rows); return; }
 
   $('#tblCompare').innerHTML = `
     <thead>
@@ -438,6 +470,46 @@ function renderCompare() {
     }).join('')}</tbody>`;
 }
 
+const SOURCE_LABEL = { actual: 'ใช้จริง', store: 'Store', manual: 'MIN/MAX เดิม' };
+
+/** Which method the suggested qty comes from, following the "ยอดแนะนำจาก" setting. */
+function suggestion(r) {
+  const src = state.qtySource;
+  if (src !== 'auto') return { qty: defaultQty(r, src), from: src };
+  if (r.orderActual) return { qty: r.orderActual, from: 'actual' };
+  if (r.orderStore) return { qty: r.orderStore, from: 'store' };
+  return { qty: r.orderManual, from: r.orderManual ? 'manual' : '' };
+}
+
+/** Default view: one suggested number per item; the 3-method comparison is behind the toggle. */
+function renderCompareSimple(rows) {
+  $('#tblCompare').innerHTML = `
+    <thead><tr>
+      <th title="เลือกเพื่อสั่งซื้อ">สั่ง</th><th>สินค้า</th><th>PC</th>
+      <th class="n">คงเหลือ</th><th class="n">ใช้/เดือน</th><th>แนวโน้ม</th>
+      <th class="n">แนะนำสั่ง</th><th class="n">จำนวนสั่ง</th><th>ข้อควรรู้</th>
+    </tr></thead>
+    <tbody>${rows.map(r => {
+      const c = state.cart[r.sku];
+      const s = suggestion(r);
+      const warn = r.flags.find(f => /ต้องถาม|ไม่ถูกเบิก|ไม่ถึงจุด|≠/.test(f)) || '';
+      return `<tr data-sku="${r.sku}" class="${c ? 'sel' : ''}">
+        <td><input type="checkbox" data-pick-sku ${c ? 'checked' : ''} aria-label="เลือก ${esc(r.sku)}"></td>
+        <td class="name"><b class="item-name">${esc(r.name)}</b><div class="pc">${r.sku} · ${esc(r.unit)}${r.cost ? ' · ' + money(r.cost) + '/หน่วย' : ''}</div></td>
+        <td class="pc">${esc(r.pc || r.group)}</td>
+        <td class="n">${fmt(r.balance)}</td>
+        <td class="n">${fmt1(r.avgActual)}</td>
+        <td>${spark(r)}</td>
+        <td class="n">${s.qty > 0 ? `<b>${fmt(s.qty)}</b><div class="src-tag">${esc(SOURCE_LABEL[s.from] || '')}</div>` : '<span class="zero">–</span>'}</td>
+        <td class="n"><input class="qty" type="number" min="0" step="1" data-qty value="${c ? c.qty : ''}" ${c ? '' : 'disabled'} aria-label="จำนวนสั่ง"></td>
+        <td class="flags">${esc(warn)}</td>
+      </tr>`;
+    }).join('')}</tbody>`;
+}
+
+$('#detailToggle').checked = !!state.detail;
+$('#detailToggle').addEventListener('change', e => { state.detail = e.target.checked; save(); renderCompare(); });
+
 function setPicked(sku, on) {
   const r = bySku.get(sku);
   if (!r) return;
@@ -467,6 +539,7 @@ document.querySelectorAll('[data-bulk]').forEach(b => b.addEventListener('click'
   const rows = filtered();
   for (const r of rows) {
     if (mode === 'none') setPicked(r.sku, false);
+    else if (mode === 'suggested' && suggestion(r).qty > 0) setPicked(r.sku, true);
     else if (mode === 'visible') setPicked(r.sku, true);
     else if (mode === 'actual' && r.orderActual > 0) setPicked(r.sku, true);
     else if (mode === 'store' && r.orderStore > 0) setPicked(r.sku, true);
@@ -525,6 +598,7 @@ function cartRows() {
 }
 
 function renderCart() {
+  updateStepper();
   const items = cartRows();
   const total = items.reduce((a, x) => a + x.c.qty * x.r.cost, 0);
   $('#cartTotal').textContent = items.length ? `${items.length} รายการ · ประมาณ ${money(total)}` : '';
@@ -716,7 +790,7 @@ function applySession(info) {
   $('#roundBox').hidden = !isAdmin();
   renderGate();
   const blocked = SERVER && !active;
-  $('#filesPanel').hidden = blocked;
+  $('#sidenav').hidden = blocked;
   $('.top-actions').querySelectorAll('.btn').forEach(b => { b.hidden = blocked; });
   if (blocked) { $('#summary').hidden = true; $('#work').hidden = true; return; }
   recompute();
@@ -865,6 +939,7 @@ async function refreshBudget() {
   try { budgetOpts = await gasCall('getBudgetOptions'); }
   catch (e) { budgetOpts = { year: 0, lines: [], reserved: {}, error: errMsg(e) }; }
   if (activeTab === 'cart') renderSubmitBox();
+  if (activeTab === 'home') renderHome();
   if (activeTab === 'admin') renderAdmin();
 }
 
@@ -913,7 +988,18 @@ function fillBudgetSelect() {
   if (lines.some(l => l.key === cur)) sel.value = cur;
 }
 
+/** Step 2 progress: items → budget + month → send. */
+function updateStepper() {
+  const li = document.querySelectorAll('#cartStepper li');
+  const hasItems = cartTotals().n > 0;
+  const hasBudget = !!($('#budgetSel').value && $('#monthSel').value);
+  const done = [hasItems, hasItems && hasBudget, false];
+  const current = !hasItems ? 0 : !hasBudget ? 1 : 2;
+  li.forEach((el, i) => { el.classList.toggle('done', done[i]); el.classList.toggle('on', i === current); });
+}
+
 function renderBudgetInfo() {
+  updateStepper();
   const line = budgetOpts && budgetOpts.lines.find(l => l.key === $('#budgetSel').value);
   const m = Number($('#monthSel').value);
   const total = cartRows().reduce((a, x) => a + x.c.qty * x.r.cost, 0);
@@ -1030,7 +1116,71 @@ function updateReqBadge() {
   const n = requests.filter(needsMe).length;
   $('#reqBadge').hidden = !n;
   $('#reqBadge').textContent = n;
+  if (activeTab === 'home') renderHome();
 }
+
+// ------------------------------------------------------------ home: what to do next
+
+function renderHome() {
+  const admin = isAdmin();
+  const hasData = merged.rows.length > 0;
+  const { n: cartN, v: cartV } = cartTotals();
+  const todo = SERVER && isMember() ? requests.filter(needsMe) : [];
+  const hour = new Date().getHours();
+  const hello = hour < 12 ? 'สวัสดีตอนเช้า' : hour < 17 ? 'สวัสดีตอนบ่าย' : 'สวัสดีตอนเย็น';
+  $('#homeTitle').textContent = me && me.name ? `${hello}, ${me.name}` : 'หน้าแรก';
+  $('#homeSub').textContent = new Date().toLocaleDateString('th-TH', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) +
+    (me && me.role ? ` · ${admin ? 'Admin' : 'User'}` : '');
+
+  // Setup gaps that block the workflow
+  const alerts = [];
+  if (!hasData) alerts.push(admin || !SERVER
+    ? ['ยังไม่มีข้อมูล Store — นำเข้าไฟล์ 4 ไฟล์ก่อนเริ่มใช้งาน', 'data', 'ไปนำเข้าไฟล์']
+    : ['ยังไม่มีข้อมูล Store — รอ Admin นำเข้าไฟล์', '', '']);
+  if (SERVER && isMember() && budgetOpts && !budgetOpts.error && !budgetOpts.lines.length) alerts.push(admin
+    ? ['ยังไม่มีข้อมูล Budget — ส่งคำขอไม่ได้จนกว่าจะนำเข้า', 'admin', 'นำเข้า Budget']
+    : ['ยังไม่มีข้อมูล Budget — รอ Admin นำเข้า', '', '']);
+  if (admin && masterPc.length === 0 && hasData) alerts.push(['ยังไม่ได้ตั้งผู้รับผิดชอบ PC (Master PC) — ระบบจะส่งอีเมลให้ PC ไม่ได้', 'admin', 'ตั้งค่า']);
+  $('#homeAlerts').innerHTML = alerts.map(([msg, tab, label]) =>
+    `<div class="alert-row"><span>${esc(msg)}</span>${tab ? `<button class="btn sm" data-go="${tab}">${esc(label)}</button>` : ''}</div>`).join('');
+
+  // Steps with live status
+  let stepNo = 0; // numbered in display order (admins get an extra first step)
+  const step = (_, title, desc, status, tab, cta, done) => `<li class="${done ? 'done' : ''}">
+      <span class="step-no">${++stepNo && done ? '✓' : stepNo}</span>
+      <div class="step-body"><b>${title}</b><div class="hint">${desc}</div>${status ? `<div class="step-status">${status}</div>` : ''}</div>
+      ${tab ? `<button class="btn sm ${done ? 'ghost' : ''}" data-go="${tab}">${cta}</button>` : ''}</li>`;
+  const s = hasData ? summarize(merged.rows) : null;
+  const steps = [];
+  if (admin || !SERVER) steps.push(step(0, 'อัปเดตข้อมูล Store', 'นำเข้าไฟล์คงเหลือ / การใช้ / จุดสั่งซื้อ / MIN-MAX', hasData ? `มีข้อมูล ${fmt(merged.rows.length)} รายการ · ${merged.months.length} เดือน` : '', 'data', 'ข้อมูล Store', hasData));
+  steps.push(step(1, 'เลือกรายการที่จะสั่ง', 'ระบบแนะนำจำนวนจากยอดใช้จริง ติ๊กเลือกและแก้จำนวนได้',
+    s ? `แนะนำให้สั่ง ${fmt(merged.rows.filter(r => suggestion(r).qty > 0).length)} รายการ (ยอดแนะนำจาก: ${esc($("#qtySource").selectedOptions[0].text)}) · เลือกแล้ว ${fmt(cartN)}` : '', 'compare', 'เลือกรายการ', cartN > 0));
+  steps.push(step(2, admin ? 'ตรวจ & ส่ง' : 'ตรวจ & ส่งคำขอ',
+    admin ? 'ส่งให้ PC ยืนยันทางอีเมล หรือส่งคำขอเองพร้อม Budget + เดือน' : 'เลือก Budget และเดือนที่จะใช้ของ แล้วส่งให้ Admin',
+    cartN ? `${fmt(cartN)} รายการ · ${money(cartV)}` : '', 'cart', 'ตรวจ & ส่ง', false));
+  if (SERVER) steps.push(step(3, admin ? 'อนุมัติ → PR/PO → รับของ' : 'ติดตามสถานะ',
+    admin ? 'ตรวจงบ ขออนุมัติเกินงบ ออก PR/PO และบันทึกรับของ' : 'ดูว่าคำขออยู่ขั้นไหน · ยืนยันรายการที่ Admin ส่งมาให้',
+    todo.length ? `<span class="over">รอคุณ ${todo.length} รายการ</span>` : '', 'requests', 'ติดตามคำขอ', false));
+  $('#homeSteps').innerHTML = steps.join('');
+
+  // Work waiting on me
+  $('#homeTodoCount').hidden = !todo.length;
+  $('#homeTodoCount').textContent = todo.length;
+  $('#homeTodo').innerHTML = !SERVER ? '<p class="hint">เข้าสู่ระบบเพื่อดูงานที่รอคุณ</p>'
+    : !todo.length ? '<div class="empty-sm">ไม่มีงานค้าง 🎉</div>'
+    : `<ul class="todo-list">${todo.slice(0, 6).map(r => `<li data-open-req="${esc(r.request_id)}">
+        <span class="tag ${STATUS_CLASS[r.status] || ''}">${esc(r.status)}</span>
+        <span class="todo-main"><b>${esc(r.request_id)}</b> ${esc(r.pc_code || '')} · ${esc(r.requester_name || '')}</span>
+        <span class="num">${money(r.total)}</span></li>`).join('')}</ul>
+      ${todo.length > 6 ? `<button class="btn sm ghost" data-go="requests">ดูทั้งหมด ${todo.length} รายการ</button>` : ''}`;
+}
+
+document.addEventListener('click', e => {
+  const go = e.target.closest('[data-go]');
+  if (go) { if (go.dataset.go === 'requests') $('#reqFilter').value = 'todo'; goTab(go.dataset.go); return; }
+  const open = e.target.closest('[data-open-req]');
+  if (open) { $('#reqFilter').value = ''; focusReq = open.dataset.openReq; goTab('requests'); }
+});
 
 /** Budget still free for r's line/month, not counting r itself. */
 function availExcluding(r) {
@@ -1272,6 +1422,7 @@ $('#btnRound').addEventListener('click', async () => {
 async function loadMasterPc() {
   try { masterPc = await gasCall('listMasterPc'); } catch (e) { masterPc = []; }
   if (activeTab === 'admin') renderMasterPc();
+  if (activeTab === 'home') renderHome();
 }
 
 function renderMasterPc() {
