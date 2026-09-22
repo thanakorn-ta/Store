@@ -18,7 +18,7 @@ var MEMBER_FNS = [
   // shared Store data
   'getStoreData', 'saveDataFile', 'removeDataFile',
   // budget + requests (workflow)
-  'getBudgetOptions', 'importBudget', 'submitOrderRequest', 'createRound', 'confirmRequest', 'rejectByPc',
+  'getBudgetOptions', 'importBudget', 'importBudgetFromDrive', 'submitOrderRequest', 'createRound', 'confirmRequest', 'rejectByPc',
   'cancelMyRequest', 'decideRequest', 'requestOverBudget', 'managerDecision', 'issuePo', 'markReceived',
   'listMyRequests', 'listAllRequests', 'installReminderTrigger',
   // admin

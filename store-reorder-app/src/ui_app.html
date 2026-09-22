@@ -404,6 +404,7 @@ function renderActive() {
   else if (activeTab === 'cart') { renderCart(); renderSubmitBox(); }
   else if (activeTab === 'requests') loadRequests();
   else if (activeTab === 'admin') { members = null; renderAdmin(); } // always fresh: sign-ups arrive any time
+  else if (activeTab === 'budget') renderBudget();
 }
 
 // ------------------------------------------------------------ compare table
@@ -787,6 +788,7 @@ function applySession(info) {
   }
   $('#tabRequests').hidden = !active;
   $('#tabAdmin').hidden = !isAdmin();
+  $('#tabBudget').hidden = !active;
   $('#roundBox').hidden = !isAdmin();
   renderGate();
   const blocked = SERVER && !active;
@@ -941,6 +943,7 @@ async function refreshBudget() {
   if (activeTab === 'cart') renderSubmitBox();
   if (activeTab === 'home') renderHome();
   if (activeTab === 'admin') renderAdmin();
+  if (activeTab === 'budget') renderBudget();
 }
 
 function budgetAvail(line, m) {
@@ -1511,6 +1514,190 @@ $('#memberAdd').addEventListener('submit', async e => {
       email: f.email.value, role: f.role.value, status: 'active' });
     f.reset(); toast('เพิ่มสมาชิกแล้ว — ผู้ใช้จะถูกบังคับเปลี่ยนรหัสผ่านตอนเข้าสู่ระบบครั้งแรก'); renderAdmin();
   } catch (err) { toast('เพิ่มไม่สำเร็จ: ' + errMsg(err)); }
+});
+
+// ------------------------------------------------------------ budget page: every line, month by month, used vs left
+
+const MONTHS_1_12 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+let budgetOpen = null; // group key whose monthly detail is expanded
+
+/** plan / actual / pending / committed / left for one line and month. */
+function budgetCell(line, m) {
+  const mb = line.months[m] || { plan: 0, actual: 0 };
+  const d = ((budgetOpts && budgetOpts.reservedDetail) || {})[line.key + '|' + m];
+  // older servers only send the total "reserved"; count it as committed
+  const pending = d ? d.pending : 0;
+  const committed = d ? d.committed : (((budgetOpts && budgetOpts.reserved) || {})[line.key + '|' + m] || 0);
+  return { plan: mb.plan, actual: mb.actual, pending, committed, left: mb.plan - mb.actual - pending - committed };
+}
+
+const addCell = (a, b) => { for (const k of ['plan', 'actual', 'pending', 'committed', 'left']) a[k] += b[k]; return a; };
+const zeroCell = () => ({ plan: 0, actual: 0, pending: 0, committed: 0, left: 0 });
+
+const BUDGET_GROUPS = {
+  line: l => [l.key, l.label],
+  gl: l => ['gl|' + l.glCode, `${l.glCode} ${l.glName}`],
+  location: l => ['loc|' + l.location, l.location],
+  company: l => ['co|' + l.company, l.company || '(ไม่ระบุบริษัท)']
+};
+
+/** Rows for the current grouping/filters, each with per-month cells and a total for the selected period. */
+function budgetRows() {
+  const words = $('#bSearch').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const month = Number($('#bMonth').value) || 0;
+  const by = BUDGET_GROUPS[$('#bGroup').value] || BUDGET_GROUPS.line;
+  const groups = new Map();
+  for (const l of budgetOpts.lines) {
+    const text = (l.label + ' ' + l.expenseGroup).toLowerCase();
+    if (!words.every(w => text.includes(w))) continue;
+    const [key, label] = by(l);
+    const g = groups.get(key) || { key, label, lines: 0, months: {}, total: zeroCell() };
+    g.lines++;
+    for (const m of MONTHS_1_12) g.months[m] = addCell(g.months[m] || zeroCell(), budgetCell(l, m));
+    groups.set(key, g);
+  }
+  const show = $('#bShow').value;
+  return [...groups.values()].map(g => {
+    for (const m of month ? [month] : MONTHS_1_12) addCell(g.total, g.months[m]);
+    return g;
+  }).filter(g => {
+    const t = g.total;
+    if (!t.plan && !t.actual && !t.pending && !t.committed) return false;
+    if (show === 'over') return t.left < 0;
+    if (show === 'left') return t.left > 0;
+    if (show === 'used') return t.actual + t.committed > 0;
+    return true;
+  }).sort((a, b) => a.label.localeCompare(b.label));
+}
+
+const pct = (a, b) => b > 0 ? Math.round(a / b * 100) : (a > 0 ? 999 : 0);
+function useBar(t) {
+  const p = pct(t.actual + t.committed + t.pending, t.plan);
+  const w = n => Math.min(100, t.plan > 0 ? n / t.plan * 100 : (n > 0 ? 100 : 0));
+  return `<div class="use-bar ${t.left < 0 ? 'over' : ''}" title="ใช้ ${p}%">
+    <i class="a" style="width:${w(t.actual)}%"></i><i class="c" style="left:${w(t.actual)}%;width:${Math.max(0, Math.min(100 - w(t.actual), w(t.committed + t.pending)))}%"></i></div>
+    <span class="use-pct ${t.left < 0 ? 'over' : ''}">${p}%</span>`;
+}
+
+function renderBudget() {
+  if (!$('#bMonth').options.length || $('#bMonth').options.length < 13) {
+    $('#bMonth').innerHTML = '<option value="">ทั้งปี</option>' + MONTHS_1_12.map(m => `<option value="${m}">${THAI_MONTH_FULL[m]}</option>`).join('');
+  }
+  if (!budgetOpts) { $('#budgetEmpty').innerHTML = '<div class="empty">กำลังโหลด Budget…</div>'; $('#budgetBody').hidden = true; return; }
+  if (budgetOpts.error || !budgetOpts.lines.length) {
+    $('#budgetBody').hidden = true;
+    $('#budgetEmpty').innerHTML = `<div class="alert-row"><span>${budgetOpts.error ? 'โหลด Budget ไม่ได้: ' + esc(budgetOpts.error)
+      : 'ยังไม่มีข้อมูล Budget ในฐานข้อมูล' + (isAdmin() ? ' — นำเข้าที่ ตั้งค่าระบบ > ข้อมูล Budget' : ' — รอ Admin นำเข้า')}</span>
+      ${isAdmin() ? '<button class="btn sm" data-go="admin">ไปนำเข้า</button>' : ''}</div>`;
+    return;
+  }
+  $('#budgetEmpty').innerHTML = '';
+  $('#budgetBody').hidden = false;
+  const month = Number($('#bMonth').value) || 0;
+  const rows = budgetRows();
+  const total = rows.reduce((a, g) => addCell(a, g.total), zeroCell());
+  const overRows = rows.filter(g => g.total.left < 0);
+  $('#budgetSub').textContent = `ปีงบ ${budgetOpts.year || '-'} · ${fmt(budgetOpts.lines.length)} รายการ Budget · ${month ? THAI_MONTH_FULL[month] : 'ทั้งปี'}`;
+
+  $('#budgetCards').innerHTML = `
+    <div class="card"><div class="k">งบ${month ? 'เดือน' + THAI_MONTH_FULL[month] : 'ทั้งปี'}</div><div class="v">${money(total.plan)}</div><div class="s">${fmt(rows.length)} รายการที่แสดง</div></div>
+    <div class="card actual"><div class="k">ใช้จริงแล้ว (Actual)</div><div class="v">${money(total.actual)}</div><div class="s">${pct(total.actual, total.plan)}% ของงบ</div></div>
+    <div class="card store"><div class="k">คำขอที่อนุมัติ / ออก PO</div><div class="v">${money(total.committed)}</div><div class="s">รออนุมัติ ${money(total.pending)}</div></div>
+    <div class="card ${total.left < 0 ? 'dead' : 'actual'}"><div class="k">คงเหลือ</div><div class="v ${total.left < 0 ? 'over' : ''}">${money(total.left)}</div><div class="s">${pct(total.left, total.plan)}% ของงบ</div></div>
+    <div class="card dead"><div class="k">รายการที่เกินงบ</div><div class="v">${fmt(overRows.length)}</div><div class="s">เกินรวม ${money(-overRows.reduce((a, g) => a + g.total.left, 0))}</div></div>`;
+
+  // month chart across everything shown
+  const byMonth = MONTHS_1_12.map(m => rows.reduce((a, g) => addCell(a, g.months[m]), zeroCell()));
+  const max = Math.max(1, ...byMonth.map(c => Math.max(c.plan, c.actual + c.committed + c.pending)));
+  $('#budgetMonths').innerHTML = byMonth.map((c, i) => {
+    const h = n => Math.round(n / max * 100);
+    return `<button class="mc ${month === i + 1 ? 'sel' : ''} ${c.left < 0 ? 'over' : ''}" data-month="${i + 1}" title="${THAI_MONTH_FULL[i + 1]}\nงบ ${money(c.plan)}\nใช้จริง ${money(c.actual)}\nคำขอ ${money(c.committed + c.pending)}\nคงเหลือ ${money(c.left)}">
+      <span class="mc-bars"><i class="p" style="height:${h(c.plan)}%"></i><i class="u" style="height:${h(c.actual)}%"></i><i class="r" style="height:${h(c.committed + c.pending)}%;bottom:${h(c.actual)}%"></i></span>
+      <span class="mc-label">${MONTH_SHORT[i]}</span><span class="mc-left ${c.left < 0 ? 'over' : ''}">${fmtK(c.left)}</span></button>`;
+  }).join('');
+
+  const top = (list, fmtRow) => list.length ? `<ul class="todo-list">${list.map(fmtRow).join('')}</ul>` : '<div class="empty-sm">ไม่มี</div>';
+  $('#budgetOver').innerHTML = top([...overRows].sort((a, b) => a.total.left - b.total.left).slice(0, 6), g =>
+    `<li data-bopen="${esc(g.key)}"><span class="todo-main">${esc(g.label)}</span><span class="num over">${money(g.total.left)}</span></li>`);
+  $('#budgetLeft').innerHTML = top(rows.filter(g => g.total.left > 0).sort((a, b) => b.total.left - a.total.left).slice(0, 6), g =>
+    `<li data-bopen="${esc(g.key)}"><span class="todo-main">${esc(g.label)}</span><span class="num ok">${money(g.total.left)}</span></li>`);
+
+  $('#bInfo').textContent = `${fmt(rows.length)} แถว`;
+  $('#tblBudget').innerHTML = `<thead><tr>
+      <th>${esc($('#bGroup').selectedOptions[0].text.replace('แยกตาม', '').replace('รวมตาม', ''))}</th>
+      <th class="n">งบ</th><th class="n">ใช้จริง</th><th class="n">คำขอ (อนุมัติ/รอ)</th><th class="n">คงเหลือ</th><th>ใช้ไป</th></tr></thead>
+    <tbody>${rows.map(g => {
+      const t = g.total;
+      const open = budgetOpen === g.key;
+      return `<tr class="brow ${open ? 'sel' : ''}" data-bkey="${esc(g.key)}">
+          <td class="name"><span class="caret">${open ? '▾' : '▸'}</span> ${esc(g.label)}${g.lines > 1 ? `<div class="pc">${g.lines} รายการ</div>` : ''}</td>
+          <td class="n">${fmt(t.plan)}</td><td class="n">${fmt(t.actual)}</td>
+          <td class="n">${fmt(t.committed)}${t.pending ? `<div class="pc">รอ ${fmt(t.pending)}</div>` : ''}</td>
+          <td class="n ${t.left < 0 ? 'over' : 'ok'}"><b>${fmt(t.left)}</b></td><td class="bar-cell">${useBar(t)}</td></tr>
+        ${open ? `<tr class="bdetail"><td colspan="6">${budgetMonthTable(g)}</td></tr>` : ''}`;
+    }).join('')}</tbody>
+    <tfoot><tr><th>รวม</th><th class="n">${fmt(total.plan)}</th><th class="n">${fmt(total.actual)}</th><th class="n">${fmt(total.committed + total.pending)}</th>
+      <th class="n ${total.left < 0 ? 'over' : 'ok'}">${fmt(total.left)}</th><th>${useBar(total)}</th></tr></tfoot>`;
+}
+
+function budgetMonthTable(g) {
+  const cur = new Date().getMonth() + 1;
+  let run = 0;
+  return `<table class="grid month-table"><thead><tr><th>เดือน</th><th class="n">งบ</th><th class="n">ใช้จริง</th><th class="n">อนุมัติ/PO</th><th class="n">รออนุมัติ</th><th class="n">คงเหลือเดือนนี้</th><th class="n">คงเหลือสะสม</th><th>ใช้ไป</th></tr></thead>
+    <tbody>${MONTHS_1_12.map(m => {
+      const c = g.months[m];
+      run += c.left;
+      return `<tr class="${m === cur ? 'now' : ''}"><td>${THAI_MONTH_FULL[m]}${m === cur ? ' <span class="tag st-pending">เดือนนี้</span>' : ''}</td>
+        <td class="n">${fmt(c.plan)}</td><td class="n">${fmt(c.actual)}</td><td class="n">${fmt(c.committed)}</td><td class="n">${fmt(c.pending)}</td>
+        <td class="n ${c.left < 0 ? 'over' : ''}">${fmt(c.left)}</td><td class="n ${run < 0 ? 'over' : ''}">${fmt(run)}</td><td class="bar-cell">${useBar(c)}</td></tr>`;
+    }).join('')}</tbody></table>`;
+}
+
+const fmtK = n => Math.abs(n) >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : Math.abs(n) >= 1e3 ? Math.round(n / 1e3) + 'K' : fmt(n);
+
+['#bSearch', '#bGroup', '#bMonth', '#bShow'].forEach(s => $(s).addEventListener('input', () => { budgetOpen = null; renderBudget(); }));
+$('#tblBudget').addEventListener('click', e => {
+  const tr = e.target.closest('tr.brow');
+  if (!tr) return;
+  budgetOpen = budgetOpen === tr.dataset.bkey ? null : tr.dataset.bkey;
+  renderBudget();
+});
+$('#budgetMonths').addEventListener('click', e => {
+  const b = e.target.closest('[data-month]');
+  if (!b) return;
+  $('#bMonth').value = $('#bMonth').value === b.dataset.month ? '' : b.dataset.month;
+  renderBudget();
+});
+document.addEventListener('click', e => {
+  const o = e.target.closest('[data-bopen]');
+  if (!o) return;
+  budgetOpen = o.dataset.bopen;
+  renderBudget();
+  const row = document.querySelector(`tr.brow[data-bkey="${CSS.escape(budgetOpen)}"]`);
+  row && row.scrollIntoView({ block: 'center' });
+});
+$('#btnBudgetReload').addEventListener('click', () => { budgetOpts = null; renderBudget(); refreshBudget(); });
+$('#btnBudgetExport').addEventListener('click', () => {
+  if (!budgetOpts || !budgetOpts.lines.length) return toast('ยังไม่มีข้อมูล Budget');
+  const out = [];
+  for (const l of budgetOpts.lines) for (const m of MONTHS_1_12) {
+    const c = budgetCell(l, m);
+    if (!c.plan && !c.actual && !c.pending && !c.committed) continue;
+    out.push({ 'บริษัท': l.company, 'Location': l.location, 'GL Code': l.glCode, 'ประเภท': l.glName, 'Expense Group': l.expenseGroup,
+      'เดือน': m, 'งบ': c.plan, 'ใช้จริง': c.actual, 'อนุมัติ/PO': c.committed, 'รออนุมัติ': c.pending, 'คงเหลือ': Math.round(c.left * 100) / 100 });
+  }
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(out), 'Budget รายเดือน');
+  XLSX.writeFile(wb, `Budget_สรุป_${stamp()}.xlsx`);
+});
+
+// Admin: import the latest "Budget STT…" file straight from Google Drive (server reads it)
+$('#btnBudgetDrive').addEventListener('click', async () => {
+  const btn = $('#btnBudgetDrive');
+  btn.disabled = true; $('#budgetStatus').textContent = 'กำลังหาไฟล์ใน Google Drive และนำเข้า…';
+  try { toast(await gasCall('importBudgetFromDrive')); await refreshBudget(); }
+  catch (e) { toast('นำเข้าไม่สำเร็จ: ' + errMsg(e)); renderAdmin(); }
+  finally { btn.disabled = false; }
 });
 
 // ------------------------------------------------------------ boot

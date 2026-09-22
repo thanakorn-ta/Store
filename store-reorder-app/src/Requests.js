@@ -51,6 +51,13 @@ function importBudget(rows) {
   var me = requireAdmin_();
   if (!rows || !rows.length) throw new Error('ไม่พบข้อมูล Budget ในไฟล์');
   if (rows.length > 20000) throw new Error('ข้อมูล Budget มากเกินไป');
+  writeBudgetMaster_(rows);
+  logActivity_('importBudget', 'ok', me.email + ' imported ' + rows.length + ' budget rows');
+  return getBudgetOptions();
+}
+
+/** Replaces budget_master with the given aggregated rows (see BUDGET_HEADER). */
+function writeBudgetMaster_(rows) {
   var values = rows.map(function (r) {
     return BUDGET_HEADER.map(function (h) { return r[h] == null ? '' : r[h]; });
   });
@@ -60,12 +67,10 @@ function importBudget(rows) {
     var sheet = ensureSheet_(db_(), CONFIG.SHEETS.BUDGET, BUDGET_HEADER);
     sheet.clearContents();
     sheet.getRange(1, 1, 1, BUDGET_HEADER.length).setValues([BUDGET_HEADER]).setFontWeight('bold');
-    sheet.getRange(2, 1, values.length, BUDGET_HEADER.length).setValues(values);
+    if (values.length) sheet.getRange(2, 1, values.length, BUDGET_HEADER.length).setValues(values);
   } finally {
     lock.releaseLock();
   }
-  logActivity_('importBudget', 'ok', me.email + ' imported ' + rows.length + ' budget rows');
-  return getBudgetOptions();
 }
 
 function budgetLabel_(b) {
@@ -101,8 +106,26 @@ function budgetOptions_(ss) {
     year: year,
     lines: Object.keys(lines).map(function (k) { return lines[k]; })
       .sort(function (a, b) { return a.label.localeCompare(b.label); }),
-    reserved: reservedByBudget_(ss)
+    reserved: reservedByBudget_(ss),
+    reservedDetail: reservedDetail_(ss)
   };
+}
+
+/**
+ * { "key|month": { pending, committed } } for the budget page:
+ *   pending   = waiting for admin / manager (รออนุมัติ, รอหัวหน้าอนุมัติเกินงบ)
+ *   committed = approved onward (อนุมัติ, ออก PR/PO แล้ว, รับของแล้ว)
+ */
+function reservedDetail_(ss) {
+  var out = {};
+  readSheetAsObjects_(ss, CONFIG.SHEETS.REQUESTS).forEach(function (r) {
+    if (RESERVING.indexOf(r.status) === -1 || !r.budget_key) return;
+    var k = r.budget_key + '|' + Number(r.budget_month);
+    var o = out[k] = out[k] || { pending: 0, committed: 0 };
+    var pending = r.status === STATUS.PENDING || r.status === STATUS.OVER_WAIT;
+    o[pending ? 'pending' : 'committed'] += Number(r.total) || 0;
+  });
+  return out;
 }
 
 /** { "key|month": amount } for requests that hold budget. excludeId skips one request. */

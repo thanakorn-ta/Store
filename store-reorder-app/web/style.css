@@ -347,3 +347,34 @@ body.has-cartbar .main { padding-bottom: 90px; }
 }
 .stepper li.done { color: var(--good); border-bottom-color: var(--good); }
 .stepper li.done::before { content: '✓ '; }
+
+/* ================================================================ budget page */
+#budgetCards { margin-bottom: 16px; }
+.card .v.over, td.over, .num.over, .use-pct.over { color: var(--bad); }
+td.ok, .num.ok { color: var(--good); }
+.month-chart { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 6px; align-items: end; }
+.mc { font: inherit; background: none; border: 1px solid transparent; border-radius: 8px; padding: 6px 2px; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 4px; color: var(--ink); }
+.mc:hover, .mc.sel { background: var(--accent-soft); border-color: var(--accent); }
+.mc-bars { position: relative; width: 70%; max-width: 38px; height: 110px; }
+.mc-bars i { position: absolute; left: 0; right: 0; bottom: 0; border-radius: 3px 3px 0 0; }
+.mc-bars i.p { background: var(--line); }
+.mc-bars i.u { background: var(--accent); left: 18%; right: 18%; }
+.mc-bars i.r { background: color-mix(in srgb, var(--accent) 35%, transparent); left: 18%; right: 18%; }
+.mc.over .mc-bars i.u { background: var(--bad); }
+.mc-label { font-size: 12px; color: var(--ink-2); }
+.mc-left { font-size: 11px; font-family: var(--mono); color: var(--good); }
+.mc-left.over { color: var(--bad); }
+.use-bar { display: inline-block; vertical-align: middle; width: 110px; height: 8px; border-radius: 4px; background: var(--surface-2); overflow: hidden; position: relative; }
+.use-bar i { position: absolute; top: 0; bottom: 0; }
+.use-bar i.a { left: 0; background: var(--accent); }
+.use-bar i.c { background: color-mix(in srgb, var(--accent) 35%, transparent); }
+.use-bar.over i.a { background: var(--bad); }
+.use-pct { font-family: var(--mono); font-size: 12px; margin-left: 6px; }
+.bar-cell { white-space: nowrap; }
+tr.brow { cursor: pointer; }
+.caret { color: var(--ink-2); display: inline-block; width: 12px; }
+tr.bdetail > td { background: var(--surface-2); padding: 10px 12px 14px; }
+.month-table { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+.month-table tr.now td { background: var(--accent-soft); }
+#tblBudget tfoot th { position: sticky; bottom: 0; background: var(--surface-2); border-top: 1px solid var(--line); font-size: 13px; color: var(--ink); }
+@media (max-width: 860px) { .month-chart { grid-template-columns: repeat(6, minmax(0, 1fr)); } .use-bar { width: 70px; } }
