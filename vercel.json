@@ -1,5 +1,6 @@
 {
-    "rewrites": [
-          { "source": "/", "destination": "/store-ai-workflow.html" }
-    ]
+  "redirects": [
+    { "source": "/", "destination": "/store-reorder-app/web/", "permanent": false },
+    { "source": "/workflow", "destination": "/store-ai-workflow.html", "permanent": false }
+  ]
 }
