@@ -380,4 +380,29 @@ tr.bdetail > td { background: var(--surface-2); padding: 10px 12px 14px; }
 .month-table tr.now td { background: var(--accent-soft); }
 #tblBudget tfoot th { position: sticky; bottom: 0; background: var(--surface-2); border-top: 1px solid var(--line); font-size: 13px; color: var(--ink); }
 @media (max-width: 860px) { .month-chart { grid-template-columns: repeat(6, minmax(0, 1fr)); } .use-bar { width: 70px; } }
+
+/* per-item budget in the cart + grouped summary with Over Budget */
+.bcell { white-space: nowrap; }
+.bcell select { font: inherit; font-size: 12px; padding: 2px 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); }
+.bcell .bsel { max-width: 240px; margin-right: 4px; }
+.bline { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; background: var(--surface); }
+.bline.warn { display: flex; justify-content: space-between; gap: 8px; border-color: var(--bad); color: var(--bad); }
+.bline.is-over { border-color: var(--bad); background: var(--bad-soft); }
+.bline-head { display: flex; flex-direction: column; margin-bottom: 4px; }
+.over-req { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-weight: 600; color: var(--bad); cursor: pointer; }
+.over-reason { width: 100%; margin-top: 4px; font: inherit; font-size: 13px; padding: 5px 8px; border: 1px solid var(--bad); border-radius: 8px; background: var(--surface); color: var(--ink); }
+.req-budget { list-style: none; margin: 6px 0; padding: 0; font-size: 13px; }
+.req-budget li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; padding: 4px 8px; border-left: 3px solid var(--line); margin-bottom: 3px; }
+.req-budget li.is-over { border-left-color: var(--bad); background: var(--bad-soft); }
+.req-budget li .over { flex-basis: 100%; }
+td.small { font-size: 12px; max-width: 280px; }
+
+/* approval / purchasing email composer */
+.composer { margin-top: 10px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface-2); }
+.composer h4 { margin: 0 0 8px; }
+.compose-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px 12px; }
+.compose-grid label { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; color: var(--ink-2); }
+.compose-grid .wide { grid-column: 1 / -1; }
+.compose-grid input, .compose-grid textarea { font: inherit; font-size: 13px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); }
+.mail-preview { width: 100%; height: 460px; margin-top: 8px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
 </style>

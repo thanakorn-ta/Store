@@ -62,7 +62,7 @@ function aggregateBudgetValues_(values) {
     calc: col('Calculation'), company: col('Company'), division: col('Division'), mediaType: col('Media Type'),
     mediaGroup: col('Media Group'), location: col('Media Location'), expenseGroup: col('Expense Group'),
     gl: col('GL Code'), year: col('Year'), month: col('Month Number'), budget: col('Budget'),
-    revise: col('Revise Budget'), actual: col('Actual'),
+    revise: col('Revise Budget'), actual: col('Actual'), remark: col('Remark'),
     glName: head.findIndex(function (x) { return /^ประเภทของค่าใช้จ่าย/.test(x); })
   };
   var s = function (row, i) { return i < 0 || row[i] == null ? '' : String(row[i]).replace(/\s+/g, ' ').trim(); };
@@ -83,7 +83,7 @@ function aggregateBudgetValues_(values) {
       lines[k] = { key: key, company: company, division: s(row, c.division), media_type: s(row, c.mediaType),
         media_group: s(row, c.mediaGroup), media_location: location, expense_group: s(row, c.expenseGroup),
         gl_code: gl, gl_name: s(row, c.glName), year: n(row, c.year), month_number: month,
-        budget: 0, revise_budget: 0, actual: 0, plan: 0 };
+        budget: 0, revise_budget: 0, actual: 0, plan: 0, remark: '', remarks: [] };
       order.push(k);
     }
     var l = lines[k];
@@ -92,11 +92,15 @@ function aggregateBudgetValues_(values) {
     l.revise_budget += n(row, c.revise);
     l.actual += n(row, c.actual);
     l.plan += reviseCell !== '' ? n(row, c.revise) : n(row, c.budget);
+    var remark = s(row, c.remark);
+    if (remark && l.remarks.indexOf(remark) === -1) l.remarks.push(remark);
   }
   return {
     rows: order.map(function (k) {
       var l = lines[k];
       ['budget', 'revise_budget', 'actual', 'plan'].forEach(function (f) { l[f] = round2_(l[f]); });
+      l.remark = l.remarks.join(' / ').slice(0, 300);
+      delete l.remarks;
       return l;
     }),
     skipped: skipped

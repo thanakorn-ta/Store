@@ -213,7 +213,7 @@
             </div>
           </div>
           <ol id="cartStepper" class="stepper">
-            <li>ตรวจจำนวน</li><li>เลือก Budget + เดือน</li><li>ส่ง</li>
+            <li>ตรวจจำนวน</li><li>เลือก Budget + เดือน</li><li>ส่งให้ Admin ตรวจ</li>
           </ol>
           <div id="cartBody"></div>
 
@@ -222,17 +222,20 @@
             <p id="submitHint" class="hint"></p>
             <div id="submitForm" class="submit-grid">
               <div class="field">
-                <label for="budgetSearch">เลือก Budget</label>
+                <label for="budgetSearch">Budget ตั้งต้น (ใช้กับรายการที่ยังไม่ได้เลือก Budget)</label>
                 <input id="budgetSearch" type="search" placeholder="ค้นหา เช่น 530090 cookies">
                 <select id="budgetSel" size="7"></select>
-              </div>
-              <div class="field">
                 <label for="monthSel">ใช้ของเดือน</label>
                 <select id="monthSel"></select>
+                <button id="btnApplyBudget" class="btn sm ghost" type="button">ใช้ Budget + เดือนนี้กับทุกรายการ</button>
+                <p class="hint">เปลี่ยน Budget / เดือน ของแต่ละรายการได้ในตารางด้านบน</p>
+              </div>
+              <div class="field">
+                <label>สรุปงบตาม Budget ที่เลือก</label>
                 <div id="budgetInfo" class="budget-info"></div>
                 <label for="reqNote">หมายเหตุถึง Admin</label>
-                <textarea id="reqNote" rows="2" placeholder="เช่น ใช้งานโปรเจกต์…, ต้องการด่วนภายใน…"></textarea>
-                <button id="btnSubmitReq" class="btn lg">ส่งคำขอให้ Admin</button>
+                <textarea id="reqNote" rows="2" placeholder="เช่น ต้องการด่วนภายใน…, เบื้องต้นได้ปรึกษา…แล้ว"></textarea>
+                <button id="btnSubmitReq" class="btn lg">ส่งคำขอให้ Admin ตรวจ</button>
               </div>
             </div>
           </div>
@@ -256,7 +259,8 @@
                 <option value="todo">รอฉันดำเนินการ</option>
                 <option value="">ทั้งหมด</option>
                 <option>รอ PC ยืนยัน</option>
-                <option>รออนุมัติ</option>
+                <option>รอ Admin ตรวจ</option>
+                <option>รอผู้บริหารอนุมัติ</option>
                 <option>รอหัวหน้าอนุมัติเกินงบ</option>
                 <option>อนุมัติ</option>
                 <option>ออก PR/PO แล้ว</option>
@@ -301,6 +305,22 @@
               <button id="btnTrigger" class="btn sm ghost">เปิดการเตือนอัตโนมัติ</button>
             </section>
           </div>
+          <section class="panel">
+            <h3>ตั้งค่าอีเมลขออนุมัติ</h3>
+            <p class="hint">ค่าตั้งต้นตอน Admin กด "ส่งอีเมลขออนุมัติผู้บริหาร" และ "ส่งแจ้งฝ่ายจัดซื้อ" — แก้ได้อีกครั้งก่อนส่งทุกครั้ง</p>
+            <form id="settingsForm" class="compose-grid">
+              <label>ชื่อทีม (ต่อท้ายเรื่อง)<input name="team_name" placeholder="ทีม Static"></label>
+              <label>เรียน (ผู้อนุมัติ)<input name="approval_greeting" placeholder="เช่น คุณวสุ"></label>
+              <label>ผู้อนุมัติ — ถึง<input name="approval_to" placeholder="อีเมล คั่นด้วย ,"></label>
+              <label>ผู้อนุมัติ — สำเนา (CC)<input name="approval_cc" placeholder="ผู้เกี่ยวข้อง"></label>
+              <label>ฝ่ายจัดซื้อ — ถึง<input name="purchasing_to" placeholder="อีเมลฝ่ายจัดซื้อ"></label>
+              <label>ฝ่ายจัดซื้อ — สำเนา (CC)<input name="purchasing_cc"></label>
+              <label class="wide">ข้อความเพิ่มเติม (ไม่บังคับ)<textarea name="approval_intro" rows="2"></textarea></label>
+              <label class="wide">ลิงก์แนบ (ไม่บังคับ)<input name="approval_link" placeholder="https://…"></label>
+              <label class="wide">ลายเซ็นท้ายอีเมล<textarea name="signature" rows="3" placeholder="Thank you,&#10;ชื่อ ตำแหน่ง&#10;Tel."></textarea></label>
+              <div class="wide"><button class="btn sm" type="submit">บันทึกการตั้งค่า</button> <span id="settingsStatus" class="hint"></span></div>
+            </form>
+          </section>
           <section class="panel">
             <h3>Master PC — ผู้รับผิดชอบยืนยันรายการ และหัวหน้าอนุมัติเกินงบ</h3>
             <p class="hint">แถวที่ไฮไลต์ = ยังไม่มีอีเมลผู้รับผิดชอบ (สร้างคำขอได้ แต่ยังส่งอีเมลไม่ได้)</p>

@@ -20,6 +20,7 @@ var MEMBER_FNS = [
   // budget + requests (workflow)
   'getBudgetOptions', 'importBudget', 'importBudgetFromDrive', 'submitOrderRequest', 'createRound', 'confirmRequest', 'rejectByPc',
   'cancelMyRequest', 'decideRequest', 'requestOverBudget', 'managerDecision', 'issuePo', 'markReceived',
+  'getApprovalDraft', 'sendApprovalEmail', 'recordApproval', 'sendPurchasingEmail', 'getAppSettings', 'saveAppSettings',
   'listMyRequests', 'listAllRequests', 'installReminderTrigger',
   // admin
   'listMembers', 'saveMember', 'listMasterPc', 'saveMasterPc',

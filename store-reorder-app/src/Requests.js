@@ -1,47 +1,54 @@
 /**
  * Requests.js
- * Purchase requests following store-ai-workflow.html:
+ * Purchase requests — the approval flow the team uses by email today
+ * ("ขออนุมัติสั่งซื้ออุปกรณ์ (ทีม Static)"):
  *
- *  (4) Admin picks the items to order ─► (5) createRound(): one request per PC,
- *      AI-drafted email to the PC owners from master_pc              [รอ PC ยืนยัน]
- *  (6) PC owner confirms / edits qty / rejects, and picks the budget
- *      line + month the goods will be used          ─► [รออนุมัติ] / [PC ปฏิเสธ]
- *      no answer in CONFIG.REMINDER_AFTER_DAYS ─► reminder email (daily trigger)
- *  (7) Admin reviews (AI summary in the email); budget check:
- *        enough      ─► approve                                         [อนุมัติ]
- *        not enough  ─► (8b) requestOverBudget(): email the PC manager
- *                        [รอหัวหน้าอนุมัติเกินงบ] ─► manager approves ─► [รออนุมัติ]
- *  (9) issuePo(): PR/PO number, commits spend to pr_po_log         [ออก PR/PO แล้ว]
- * (10) markReceived()                                                 [รับของแล้ว]
+ *  1. User picks items + qty and, for EACH item, the budget line (Company x
+ *     Media Location x GL Code) and the month it is charged to.
+ *     If a line/month has no budget left the user must tick "ขอ Over Budget"
+ *     and give a reason, otherwise the request is refused.       [รอ Admin ตรวจ]
+ *  2. Admin reviews, then sends the approval email to the head (to/cc from
+ *     Settings) in the team's format: per media + expense group, BG per month,
+ *     items, Store balance, remarks, and the 14-column table.  [รอผู้บริหารอนุมัติ]
+ *  3. Head replies "Approved" → admin records it (or the head, if a member,
+ *     approves in the app).                                            [อนุมัติ]
+ *     Admin can then send "ได้รับการอนุมัติสั่งซื้อ…" to Purchasing.
+ *  4. issuePo(): PR/PO number, commits spend to pr_po_log         [ออก PR/PO แล้ว]
+ *  5. markReceived()                                                 [รับของแล้ว]
  *
- * Users can also start a request themselves from their cart (submitOrderRequest),
- * which enters at step 6's output ([รออนุมัติ]).
+ * Admins can also send items to each PC's owners first (createRound →
+ * [รอ PC ยืนยัน] → confirmRequest), which then enters step 2.
  *
- * Budget: an admin uploads the "Budget STT 2026 - Revise-Budget" export (Admin tab),
- * aggregated per Company x Media Location x GL Code x month in budget_master.
+ * Budget (budget_master, uploaded by an admin):
  *   plan      = Revise Budget when filled, else Budget
- *   reserved  = totals of requests from [รออนุมัติ] onward that are not rejected/cancelled
+ *   reserved  = item amounts of requests waiting or approved, per item budget line/month
  *   available = plan - actual - reserved
  */
 
 var BUDGET_HEADER = ['key', 'company', 'division', 'media_type', 'media_group', 'media_location',
-  'expense_group', 'gl_code', 'gl_name', 'year', 'month_number', 'budget', 'revise_budget', 'actual', 'plan'];
+  'expense_group', 'gl_code', 'gl_name', 'year', 'month_number', 'budget', 'revise_budget', 'actual', 'plan', 'remark'];
 var REQUEST_HEADER = ['request_id', 'created_at', 'source', 'round_id', 'pc_code', 'pc_name', 'assigned_to',
-  'requester_email', 'requester_name', 'budget_key', 'budget_label', 'budget_year', 'budget_month', 'total',
-  'item_count', 'available_at_submit', 'over_budget', 'status', 'note', 'sent_at', 'reminded_at',
+  'requester_email', 'requester_name', 'budget_key', 'budget_label', 'budget_year', 'budget_month', 'budget_months', 'total',
+  'item_count', 'available_at_submit', 'over_budget', 'over_reason', 'status', 'note', 'sent_at', 'reminded_at',
   'confirmed_by', 'confirmed_at', 'manager_email', 'manager_decision', 'manager_note', 'manager_at',
-  'decided_by', 'decided_at', 'admin_note', 'po_no', 'po_at', 'received_at'];
+  'decided_by', 'decided_at', 'admin_note', 'approval_to', 'approval_cc', 'approval_subject', 'approval_sent_at',
+  'approved_by', 'approved_at', 'approval_note', 'purchasing_sent_at', 'po_no', 'po_at', 'received_at'];
 var REQUEST_ITEM_HEADER = ['request_id', 'sku', 'name', 'pc_code', 'pc_name', 'unit', 'suggested_qty', 'qty',
-  'unit_cost', 'amount', 'note'];
+  'unit_cost', 'amount', 'note', 'budget_key', 'budget_label', 'budget_year', 'budget_month', 'store_balance',
+  'over_budget', 'over_reason'];
 var PR_LOG_HEADER = ['created_at', 'request_id', 'po_no', 'pc_code', 'budget_key', 'budget_year', 'month_number', 'amount', 'issued_by'];
 
 var STATUS = {
   WAIT_PC: 'รอ PC ยืนยัน', PC_REJECTED: 'PC ปฏิเสธ',
-  PENDING: 'รออนุมัติ', OVER_WAIT: 'รอหัวหน้าอนุมัติเกินงบ',
+  PENDING: 'รอ Admin ตรวจ', APPROVAL_WAIT: 'รอผู้บริหารอนุมัติ', OVER_WAIT: 'รอหัวหน้าอนุมัติเกินงบ',
   APPROVED: 'อนุมัติ', REJECTED: 'ไม่อนุมัติ', CANCELLED: 'ยกเลิก',
   PO: 'ออก PR/PO แล้ว', RECEIVED: 'รับของแล้ว'
 };
-var RESERVING = [STATUS.PENDING, STATUS.OVER_WAIT, STATUS.APPROVED, STATUS.PO, STATUS.RECEIVED];
+var LEGACY_PENDING = 'รออนุมัติ'; // status text before version 2026-09-22c; treated as PENDING
+var RESERVING = [STATUS.PENDING, STATUS.APPROVAL_WAIT, STATUS.OVER_WAIT, STATUS.APPROVED, STATUS.PO, STATUS.RECEIVED];
+var WAITING = [STATUS.PENDING, STATUS.APPROVAL_WAIT, STATUS.OVER_WAIT];
+
+function normStatus_(s) { return s === LEGACY_PENDING ? STATUS.PENDING : String(s || ''); }
 var THAI_MONTH_NAMES = ['', 'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
 
 // ============================================================ budget
@@ -92,14 +99,15 @@ function budgetOptions_(ss) {
     if (!l) {
       l = lines[b.key] = {
         key: String(b.key), label: budgetLabel_(b), company: String(b.company),
-        location: String(b.media_location), glCode: String(b.gl_code), glName: String(b.gl_name),
-        expenseGroup: String(b.expense_group), months: {}
+        location: String(b.media_location), mediaGroup: String(b.media_group || ''), mediaType: String(b.media_type || ''),
+        glCode: String(b.gl_code), glName: String(b.gl_name), expenseGroup: String(b.expense_group), months: {}
       };
     }
     var m = Number(b.month_number);
-    if (!l.months[m]) l.months[m] = { plan: 0, actual: 0 };
+    if (!l.months[m]) l.months[m] = { plan: 0, actual: 0, remark: '' };
     l.months[m].plan += Number(b.plan) || 0;
     l.months[m].actual += Number(b.actual) || 0;
+    if (b.remark) l.months[m].remark = String(b.remark);
     year = year || Number(b.year) || 0;
   });
   return {
@@ -112,31 +120,92 @@ function budgetOptions_(ss) {
 }
 
 /**
- * { "key|month": { pending, committed } } for the budget page:
- *   pending   = waiting for admin / manager (รออนุมัติ, รอหัวหน้าอนุมัติเกินงบ)
- *   committed = approved onward (อนุมัติ, ออก PR/PO แล้ว, รับของแล้ว)
+ * Budget held by open requests, per item: [{ key, month, amount, status, requestId }].
+ * Each item carries its own budget line/month; items saved before that fall back
+ * to the request header's single budget.
  */
-function reservedDetail_(ss) {
-  var out = {};
+function reservations_(ss) {
+  var reqs = {};
   readSheetAsObjects_(ss, CONFIG.SHEETS.REQUESTS).forEach(function (r) {
-    if (RESERVING.indexOf(r.status) === -1 || !r.budget_key) return;
-    var k = r.budget_key + '|' + Number(r.budget_month);
-    var o = out[k] = out[k] || { pending: 0, committed: 0 };
-    var pending = r.status === STATUS.PENDING || r.status === STATUS.OVER_WAIT;
-    o[pending ? 'pending' : 'committed'] += Number(r.total) || 0;
+    if (r.request_id) reqs[r.request_id] = { status: normStatus_(r.status), key: r.budget_key, month: Number(r.budget_month) };
+  });
+  var out = [];
+  readSheetAsObjects_(ss, CONFIG.SHEETS.REQUEST_ITEMS).forEach(function (i) {
+    var r = reqs[i.request_id];
+    if (!r || RESERVING.indexOf(r.status) === -1 || !(Number(i.qty) > 0)) return;
+    var key = i.budget_key || r.key, month = Number(i.budget_month) || r.month;
+    if (!key || !month) return;
+    out.push({ key: String(key), month: month, amount: Number(i.amount) || 0, status: r.status, requestId: i.request_id });
   });
   return out;
 }
 
-/** { "key|month": amount } for requests that hold budget. excludeId skips one request. */
-function reservedByBudget_(ss, excludeId) {
+/**
+ * { "key|month": { pending, committed } } for the budget page:
+ *   pending   = waiting (รอ Admin ตรวจ, รอผู้บริหารอนุมัติ, รอหัวหน้าอนุมัติเกินงบ)
+ *   committed = approved onward (อนุมัติ, ออก PR/PO แล้ว, รับของแล้ว)
+ */
+function reservedDetail_(ss) {
   var out = {};
-  readSheetAsObjects_(ss, CONFIG.SHEETS.REQUESTS).forEach(function (r) {
-    if (RESERVING.indexOf(r.status) === -1 || !r.budget_key || r.request_id === excludeId) return;
-    var k = r.budget_key + '|' + Number(r.budget_month);
-    out[k] = (out[k] || 0) + (Number(r.total) || 0);
+  reservations_(ss).forEach(function (x) {
+    var o = out[x.key + '|' + x.month] = out[x.key + '|' + x.month] || { pending: 0, committed: 0 };
+    o[WAITING.indexOf(x.status) !== -1 ? 'pending' : 'committed'] += x.amount;
   });
   return out;
+}
+
+/** { "key|month": amount } held by open requests. excludeId skips one request. */
+function reservedByBudget_(ss, excludeId) {
+  var out = {};
+  reservations_(ss).forEach(function (x) {
+    if (x.requestId === excludeId) return;
+    out[x.key + '|' + x.month] = (out[x.key + '|' + x.month] || 0) + x.amount;
+  });
+  return out;
+}
+
+/**
+ * Checks each budget line/month used by the given item rows against what is left.
+ * Lines that go over need a reason in overReasons["key|month"], else this throws.
+ * Returns [{ key, month, label, plan, available, amount, over, reason }].
+ */
+function checkBudgetLines_(opts, rows, overReasons) {
+  var groups = {}, order = [];
+  rows.forEach(function (r) {
+    var k = r.budget_key + '|' + r.budget_month;
+    if (!groups[k]) { groups[k] = { key: r.budget_key, month: Number(r.budget_month), amount: 0 }; order.push(k); }
+    groups[k].amount += Number(r.amount) || 0;
+  });
+  var missing = [];
+  var out = order.map(function (k) {
+    var g = groups[k];
+    var av = availableFor_(opts, g.key, g.month);
+    if (!av) throw new Error('ไม่พบ Budget ที่เลือก (' + g.key + ')');
+    var mb = av.line.months[g.month] || { plan: 0 };
+    var over = round2_(g.amount) > round2_(av.available);
+    var reason = String((overReasons || {})[k] || '').trim().slice(0, 500);
+    if (over && !reason) missing.push(av.line.label + ' เดือน ' + THAI_MONTH_NAMES[g.month] + ' (คงเหลือ ' + fmtMoney_(av.available) + ' บาท)');
+    return { key: g.key, month: g.month, label: av.line.label, plan: mb.plan, available: round2_(av.available),
+      amount: round2_(g.amount), over: over, reason: over ? reason : '' };
+  });
+  if (missing.length) throw new Error('งบไม่พอ ต้องขอ Over Budget พร้อมเหตุผล: ' + missing.join(' · '));
+  return out;
+}
+
+/** Header fields summarising the budget lines of a request. */
+function budgetSummaryFields_(lines, year) {
+  var keys = uniq_(lines.map(function (l) { return l.key; }));
+  var months = uniq_(lines.map(function (l) { return String(l.month); })).map(Number).sort(function (a, b) { return a - b; });
+  var over = lines.filter(function (l) { return l.over; });
+  return {
+    budget_key: keys.length === 1 ? keys[0] : '',
+    budget_label: keys.length === 1 ? lines[0].label : (keys.length + ' Budget: ' + uniq_(lines.map(function (l) { return l.label; })).join(' / ')).slice(0, 500),
+    budget_year: year, budget_month: months.length === 1 ? months[0] : '',
+    budget_months: months.map(function (m) { return THAI_MONTH_NAMES[m]; }).join(', '),
+    available_at_submit: round2_(lines.reduce(function (a, l) { return a + l.available; }, 0)),
+    over_budget: over.length ? 'Over Budget' : '',
+    over_reason: over.map(function (l) { return l.label + ' ' + THAI_MONTH_NAMES[l.month] + ': ' + l.reason; }).join(' | ').slice(0, 1000)
+  };
 }
 
 function availableFor_(opts, key, month) {
@@ -193,54 +262,81 @@ function createRound(items, note) {
   return { roundId: roundId, created: created.map(function (c) { return { id: c.id, pc: c.pc, sentTo: c.owners.join(', ') }; }), noOwner: noOwner };
 }
 
-// ============================================================ user: submit from cart (enters as รออนุมัติ)
+// ============================================================ (1) user: submit from cart → รอ Admin ตรวจ
 
-/** payload: { budgetKey, month, note, items: [{ sku, name, pc, pcName, unit, qty, unitCost, note }] } */
+/**
+ * payload: { note, overReasons: { "budgetKey|month": reason },
+ *            items: [{ sku, name, pc, pcName, unit, qty, unitCost, note, budgetKey, month, storeBalance }] }
+ * Every item carries its own budget line + month. A line/month without enough budget
+ * left needs an Over Budget reason, else the request is refused.
+ */
 function submitOrderRequest(payload) {
   var me = requireActive_();
-  var items = (payload && payload.items || []).filter(function (i) { return Number(i.qty) > 0; });
+  payload = payload || {};
+  var items = (payload.items || []).filter(function (i) { return Number(i.qty) > 0; });
   if (!items.length) throw new Error('ยังไม่มีรายการที่จำนวนมากกว่า 0');
   if (items.length > 500) throw new Error('รายการมากเกินไป (สูงสุด 500)');
-  var month = Number(payload.month);
-  if (!(month >= 1 && month <= 12)) throw new Error('กรุณาเลือกเดือนที่จะใช้ของ');
+  items.forEach(function (i) {
+    // older pages send one budget for the whole cart
+    if (!i.budgetKey) i.budgetKey = payload.budgetKey;
+    if (!i.month) i.month = payload.month;
+    var m = Number(i.month);
+    if (!i.budgetKey) throw new Error('กรุณาเลือก Budget ของรายการ ' + (i.name || i.sku));
+    if (!(m >= 1 && m <= 12)) throw new Error('กรุณาเลือกเดือนที่ใช้ของ ของรายการ ' + (i.name || i.sku));
+  });
 
   var ss = db_();
-  var opts = budgetOptions_(ss);
-  var av = availableFor_(opts, payload.budgetKey, month);
-  if (!av) throw new Error('กรุณาเลือก Budget');
-
-  var id, total, rows;
+  var id, total, rows, lines, summary;
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
+    var opts = budgetOptions_(ss);
     id = nextRequestId_(ss);
-    rows = itemRows_(id, items, false);
+    rows = itemRows_(id, items, false, opts);
+    lines = checkBudgetLines_(opts, rows, payload.overReasons);
+    markOverRows_(rows, lines);
+    summary = budgetSummaryFields_(lines, opts.year);
     total = sumAmount_(rows);
     var pcs = uniq_(items.map(function (i) { return i.pc; }));
     var master = readMasterPc_(ss);
-    appendObject_(ss, CONFIG.SHEETS.REQUESTS, REQUEST_HEADER, {
+    var head = {
       request_id: id, created_at: new Date(), source: 'user', pc_code: pcs.join(', '),
-      requester_email: me.email, requester_name: me.name, budget_key: av.line.key, budget_label: av.line.label,
-      budget_year: opts.year, budget_month: month, total: total, item_count: rows.length,
-      available_at_submit: round2_(av.available), over_budget: total > av.available ? 'เกินงบ' : '',
+      requester_email: me.email, requester_name: me.name, total: total, item_count: rows.length,
       status: STATUS.PENDING, note: String(payload.note || '').slice(0, 500),
       confirmed_by: me.email, confirmed_at: new Date(),
       manager_email: pcs.length === 1 && master[pcs[0]] ? master[pcs[0]].manager_email : ''
-    });
+    };
+    Object.keys(summary).forEach(function (k) { head[k] = summary[k]; });
+    appendObject_(ss, CONFIG.SHEETS.REQUESTS, REQUEST_HEADER, head);
     appendObjects_(ss, CONFIG.SHEETS.REQUEST_ITEMS, REQUEST_ITEM_HEADER, rows);
   } finally {
     lock.releaseLock();
   }
   notifyAdminsForReview_(id);
-  logActivity_('submitOrderRequest', 'ok', id + ' by ' + me.email + ' total ' + total);
-  return { id: id, total: total, available: av.available, overBudget: total > av.available };
+  logActivity_('submitOrderRequest', 'ok', id + ' by ' + me.email + ' total ' + total + (summary.over_budget ? ' OVER' : ''));
+  return { id: id, total: total, overBudget: !!summary.over_budget, lines: lines };
+}
+
+/** Copies the Over Budget flag/reason of each budget line onto its item rows. */
+function markOverRows_(rows, lines) {
+  var by = {};
+  lines.forEach(function (l) { by[l.key + '|' + l.month] = l; });
+  rows.forEach(function (r) {
+    var l = by[r.budget_key + '|' + r.budget_month];
+    r.over_budget = l && l.over ? 'Over Budget' : '';
+    r.over_reason = l && l.over ? l.reason : '';
+  });
 }
 
 // ============================================================ (6) PC owner confirms / rejects
 
-/** payload: { items: [{ sku, qty, note }], budgetKey, month, note } — qty 0 drops the line. */
+/**
+ * payload: { items: [{ sku, qty, note }], budgetKey, month, note, overReason }
+ * qty 0 drops the line. The chosen budget/month applies to every item of this PC.
+ */
 function confirmRequest(id, payload) {
   var me = requireActive_();
+  payload = payload || {};
   var ss = db_();
   var req = findRequest_(ss, id);
   if (req.status !== STATUS.WAIT_PC) throw new Error('คำขอนี้ไม่ได้รอการยืนยันแล้ว (' + req.status + ')');
@@ -253,28 +349,37 @@ function confirmRequest(id, payload) {
 
   var edits = {};
   (payload.items || []).forEach(function (i) { edits[i.sku] = i; });
-  var remaining = readItems_(ss, id).filter(function (i) {
-    return (edits[i.sku] ? Math.round(Number(edits[i.sku].qty) || 0) : i.qty) > 0;
-  });
-  if (!remaining.length) throw new Error('ทุกรายการเป็น 0 — ถ้าไม่ต้องการสั่ง ให้กด "ไม่สั่งรอบนี้"');
+  var planned = readItems_(ss, id).map(function (i) {
+    var qty = edits[i.sku] ? Math.max(0, Math.round(Number(edits[i.sku].qty) || 0)) : i.qty;
+    return { budget_key: av.line.key, budget_month: month, amount: round2_(qty * (Number(i.unit_cost) || 0)), qty: qty };
+  }).filter(function (i) { return i.qty > 0; });
+  if (!planned.length) throw new Error('ทุกรายการเป็น 0 — ถ้าไม่ต้องการสั่ง ให้กด "ไม่สั่งรอบนี้"');
+  var reasons = {};
+  reasons[av.line.key + '|' + month] = payload.overReason;
+  var lines = checkBudgetLines_(opts, planned, reasons);
+  var line = lines[0];
+
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
   var total;
   try {
     total = updateItems_(ss, id, function (item) {
       var e = edits[item.sku];
-      if (!e) return item;
-      item.qty = Math.max(0, Math.round(Number(e.qty) || 0));
-      item.amount = round2_(item.qty * (Number(item.unit_cost) || 0));
-      if (e.note != null) item.note = String(e.note).slice(0, 300);
+      if (e) {
+        item.qty = Math.max(0, Math.round(Number(e.qty) || 0));
+        item.amount = round2_(item.qty * (Number(item.unit_cost) || 0));
+        if (e.note != null) item.note = String(e.note).slice(0, 300);
+      }
+      item.budget_key = av.line.key; item.budget_label = av.line.label;
+      item.budget_year = opts.year; item.budget_month = month;
+      item.over_budget = line.over ? 'Over Budget' : ''; item.over_reason = line.over ? line.reason : '';
       return item;
     });
-    setRequestFields_(ss, id, {
-      budget_key: av.line.key, budget_label: av.line.label, budget_year: opts.year, budget_month: month,
-      total: total.amount, item_count: total.count, available_at_submit: round2_(av.available),
-      over_budget: total.amount > av.available ? 'เกินงบ' : '', status: STATUS.PENDING,
-      note: String(payload.note || req.note || '').slice(0, 500), confirmed_by: me.email, confirmed_at: new Date()
-    });
+    var fields = budgetSummaryFields_(lines, opts.year);
+    fields.total = total.amount; fields.item_count = total.count; fields.status = STATUS.PENDING;
+    fields.note = String(payload.note || req.note || '').slice(0, 500);
+    fields.confirmed_by = me.email; fields.confirmed_at = new Date();
+    setRequestFields_(ss, id, fields);
   } finally {
     lock.releaseLock();
   }
@@ -302,7 +407,8 @@ function cancelMyRequest(id) {
   var ss = db_();
   var req = findRequest_(ss, id);
   if (req.requester_email !== me.email && me.role !== 'admin') throw new Error('ยกเลิกได้เฉพาะคำขอของตัวเอง');
-  if ([STATUS.PENDING, STATUS.WAIT_PC, STATUS.OVER_WAIT].indexOf(req.status) === -1) throw new Error('ยกเลิกไม่ได้ในสถานะ ' + req.status);
+  var cancellable = [STATUS.PENDING, STATUS.WAIT_PC, STATUS.OVER_WAIT].concat(me.role === 'admin' ? [STATUS.APPROVAL_WAIT] : []);
+  if (cancellable.indexOf(req.status) === -1) throw new Error('ยกเลิกไม่ได้ในสถานะ ' + req.status);
   setRequestFields_(ss, id, { status: STATUS.CANCELLED, decided_by: me.email, decided_at: new Date(), admin_note: 'ยกเลิกโดย ' + me.email });
   logActivity_('cancelRequest', 'ok', id + ' by ' + me.email);
   return loadRequestsFor_(me);
@@ -310,26 +416,22 @@ function cancelMyRequest(id) {
 
 // ============================================================ (7)(8) admin review + budget check
 
-/** decision: 'approve' | 'reject'. Over-budget needs the manager's approval first (8b). */
+/**
+ * Admin rejects a request (while reviewing, or when the head said no).
+ * Approval goes through sendApprovalEmail → recordApproval (Approval.js).
+ */
 function decideRequest(id, decision, note) {
   var me = requireAdmin_();
+  if (decision === 'approve') throw new Error('อนุมัติผ่าน "ส่งอีเมลขออนุมัติ" แล้วบันทึกผลเมื่อผู้บริหารตอบกลับ');
   var ss = db_();
   var req = findRequest_(ss, id);
-  if (req.status !== STATUS.PENDING) throw new Error('คำขอนี้ไม่ได้อยู่ในสถานะรออนุมัติ (' + req.status + ')');
-  var approve = decision === 'approve';
-  if (approve) {
-    var av = availableFor_({ lines: budgetOptions_(ss).lines, reserved: reservedByBudget_(ss, id) }, req.budget_key, Number(req.budget_month));
-    var over = !av || Number(req.total) > av.available;
-    if (over && req.manager_decision !== 'อนุมัติ') {
-      throw new Error('งบไม่พอ (คงเหลือ ' + fmtMoney_(av ? av.available : 0) + ' บาท) — กด "ขออนุมัติเกินงบ" ให้หัวหน้า PC อนุมัติก่อน');
-    }
-  }
-  setRequestFields_(ss, id, { status: approve ? STATUS.APPROVED : STATUS.REJECTED, decided_by: me.email,
+  if ([STATUS.PENDING, STATUS.APPROVAL_WAIT].indexOf(req.status) === -1) throw new Error('ไม่อนุมัติได้เฉพาะคำขอที่รอตรวจ/รออนุมัติ (' + req.status + ')');
+  setRequestFields_(ss, id, { status: STATUS.REJECTED, decided_by: me.email,
     decided_at: new Date(), admin_note: String(note || '').slice(0, 500) });
-  mailPeople_(requestPeople_(req), '[Store Reorder] ' + id + ' ' + (approve ? STATUS.APPROVED : STATUS.REJECTED),
-    'คำขอ ' + esc_(id) + ' (' + fmtMoney_(req.total) + ' บาท): <b>' + (approve ? STATUS.APPROVED : STATUS.REJECTED) + '</b>' +
+  mailPeople_(requestPeople_(req), '[Store Reorder] ' + id + ' ' + STATUS.REJECTED,
+    'คำขอ ' + esc_(id) + ' (' + fmtMoney_(req.total) + ' บาท): <b>' + STATUS.REJECTED + '</b>' +
     (note ? '<br>หมายเหตุจาก Admin: ' + esc_(note) : '') + appLink_(id));
-  logActivity_('decideRequest', 'ok', id + ' ' + decision + ' by ' + me.email);
+  logActivity_('decideRequest', 'ok', id + ' reject by ' + me.email);
   return loadRequestsFor_(me);
 }
 
@@ -387,12 +489,19 @@ function issuePo(id, poNo) {
   poNo = String(poNo || '').trim().slice(0, 60);
   if (!poNo) throw new Error('กรุณาใส่เลข PR/PO');
   setRequestFields_(ss, id, { status: STATUS.PO, po_no: poNo, po_at: new Date() });
-  // Commit spend per PC (Budget.js / checkBudget_ reads pr_po_log)
-  var byPc = {};
-  readItems_(ss, id).forEach(function (i) { byPc[i.pc_code] = (byPc[i.pc_code] || 0) + Number(i.amount); });
-  appendObjects_(ss, CONFIG.SHEETS.PR_LOG, PR_LOG_HEADER, Object.keys(byPc).map(function (pc) {
-    return { created_at: new Date(), request_id: id, po_no: poNo, pc_code: pc, budget_key: req.budget_key,
-      budget_year: req.budget_year, month_number: req.budget_month, amount: round2_(byPc[pc]), issued_by: me.email };
+  // Commit spend per PC x budget line x month (Budget.js / checkBudget_ reads pr_po_log)
+  var groups = {};
+  readItems_(ss, id).forEach(function (i) {
+    if (!(i.qty > 0)) return;
+    var key = i.budget_key || req.budget_key, m = i.budget_month || Number(req.budget_month);
+    var g = groups[i.pc_code + '|' + key + '|' + m] = groups[i.pc_code + '|' + key + '|' + m] ||
+      { pc: i.pc_code, key: key, month: m, year: i.budget_year || req.budget_year, amount: 0 };
+    g.amount += Number(i.amount) || 0;
+  });
+  appendObjects_(ss, CONFIG.SHEETS.PR_LOG, PR_LOG_HEADER, Object.keys(groups).map(function (k) {
+    var g = groups[k];
+    return { created_at: new Date(), request_id: id, po_no: poNo, pc_code: g.pc, budget_key: g.key,
+      budget_year: g.year, month_number: g.month, amount: round2_(g.amount), issued_by: me.email };
   }));
   mailPeople_(requestPeople_(req), '[Store Reorder] ' + id + ' ออก PR/PO แล้ว: ' + poNo,
     'คำขอ ' + esc_(id) + ' ออก PR/PO เลขที่ <b>' + esc_(poNo) + '</b> แล้ว' + appLink_(id));
@@ -463,7 +572,7 @@ function loadRequestsFor_(me) {
   if (me.role === 'admin') return loadRequests_(function () { return true; });
   return loadRequests_(function (r) {
     return r.requester_email === me.email || splitEmails_(r.assigned_to).indexOf(me.email) !== -1 ||
-      String(r.manager_email).toLowerCase() === me.email;
+      String(r.manager_email).toLowerCase() === me.email || splitEmails_(r.approval_to).indexOf(me.email) !== -1;
   });
 }
 
@@ -483,7 +592,10 @@ function loadRequests_(filterFn) {
 function toClientItem_(i) {
   return { sku: String(i.sku), name: String(i.name), pc_code: String(i.pc_code), pc_name: String(i.pc_name || ''),
     unit: String(i.unit), suggested_qty: Number(i.suggested_qty) || 0, qty: Number(i.qty), unit_cost: Number(i.unit_cost),
-    amount: Number(i.amount), note: String(i.note || '') };
+    amount: Number(i.amount), note: String(i.note || ''), budget_key: String(i.budget_key || ''),
+    budget_label: String(i.budget_label || ''), budget_year: Number(i.budget_year) || 0, budget_month: Number(i.budget_month) || 0,
+    store_balance: i.store_balance === '' || i.store_balance == null ? '' : Number(i.store_balance),
+    over_budget: String(i.over_budget || ''), over_reason: String(i.over_reason || '') };
 }
 
 /** google.script.run can't return Date objects — convert to strings. */
@@ -493,6 +605,8 @@ function toClientRequest_(r, items) {
     var v = r[h];
     out[h] = v instanceof Date ? Utilities.formatDate(v, 'Asia/Bangkok', 'yyyy-MM-dd HH:mm') : (v == null ? '' : v);
   });
+  out.status = normStatus_(r.status);
+  out.approvers = splitEmails_(r.approval_to);
   out.assigned = splitEmails_(r.assigned_to);
   out.month_label = r.budget_month ? THAI_MONTH_NAMES[Number(r.budget_month)] + ' ' + (Number(r.budget_year) || '') : '';
   out.items = items;
@@ -506,13 +620,23 @@ function nextRequestId_(ss) {
   return 'REQ-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyMMdd') + '-' + ('000' + sheet.getLastRow()).slice(-4);
 }
 
-function itemRows_(id, items, fromRound) {
+/** opts (budgetOptions_) is given when items carry budgetKey/month (user submit). */
+function itemRows_(id, items, fromRound, opts) {
   return items.map(function (i) {
     var qty = Math.max(0, Math.round(Number(i.qty) || 0));
     var cost = Math.max(0, Number(i.unitCost) || 0);
-    return { request_id: id, sku: String(i.sku), name: String(i.name || '').slice(0, 200), pc_code: String(i.pc || ''),
+    var row = { request_id: id, sku: String(i.sku), name: String(i.name || '').slice(0, 200), pc_code: String(i.pc || ''),
       pc_name: String(i.pcName || ''), unit: String(i.unit || ''), suggested_qty: fromRound ? qty : '',
-      qty: qty, unit_cost: cost, amount: round2_(qty * cost), note: String(i.note || '').slice(0, 300) };
+      qty: qty, unit_cost: cost, amount: round2_(qty * cost), note: String(i.note || '').slice(0, 300),
+      store_balance: i.storeBalance === '' || i.storeBalance == null || isNaN(Number(i.storeBalance)) ? '' : Number(i.storeBalance) };
+    if (opts && i.budgetKey) {
+      var line = opts.lines.filter(function (l) { return l.key === i.budgetKey; })[0];
+      row.budget_key = String(i.budgetKey);
+      row.budget_label = line ? line.label : '';
+      row.budget_year = opts.year;
+      row.budget_month = Number(i.month);
+    }
+    return row;
   });
 }
 
@@ -523,6 +647,7 @@ function sumAmount_(rows) {
 function findRequest_(ss, id) {
   var r = readSheetAsObjects_(ss, CONFIG.SHEETS.REQUESTS).filter(function (x) { return x.request_id === id; })[0];
   if (!r) throw new Error('ไม่พบคำขอ ' + id);
+  r.status = normStatus_(r.status);
   return r;
 }
 
@@ -642,12 +767,22 @@ function notifyAdminsForReview_(id) {
       .map(function (i) { return { name: i.name, qty: i.qty, amount: i.amount }; }), req.note).replace(/\n/g, '<br>');
   }, '');
   var from = req.source === 'round' ? req.confirmed_by : (req.requester_name || req.requester_email);
-  mailAdmins_('[Store Reorder] รออนุมัติ ' + id + ' ' + (req.pc_code || '') + ' ยืนยันโดย ' + from + over,
+  var byLine = {}, order = [];
+  items.filter(function (i) { return i.qty > 0; }).forEach(function (i) {
+    var k = (i.budget_key || req.budget_key) + '|' + (i.budget_month || req.budget_month);
+    if (!byLine[k]) { byLine[k] = { label: i.budget_label || req.budget_label, month: i.budget_month || Number(req.budget_month), amount: 0, over: i.over_budget, reason: i.over_reason }; order.push(k); }
+    byLine[k].amount += i.amount;
+  });
+  var lineHtml = order.map(function (k) {
+    var l = byLine[k];
+    return '<li>' + esc_(l.label) + ' · เดือน ' + THAI_MONTH_NAMES[Number(l.month)] + ' · ' + fmtMoney_(l.amount) + ' บาท' +
+      (l.over ? ' <b style="color:#b23b2e">ขอ Over Budget' + (l.reason ? ': ' + esc_(l.reason) : '') + '</b>' : '') + '</li>';
+  }).join('');
+  mailAdmins_('[Store Reorder] รอ Admin ตรวจ ' + id + ' ' + (req.pc_code || '') + ' จาก ' + from + (over ? ' (Over Budget)' : ''),
     (summary ? '<p>' + summary + '</p>' : '') +
-    '<p><b>' + esc_(id) + '</b> · Budget: ' + esc_(req.budget_label) + ' · ใช้เดือน ' + THAI_MONTH_NAMES[Number(req.budget_month)] +
-    '<br>ยอดรวม <b>' + fmtMoney_(req.total) + '</b> บาท · งบคงเหลือก่อนคำขอนี้ ' + fmtMoney_(req.available_at_submit) + ' บาท' +
-    (over ? ' <b style="color:#b23b2e">เกินงบ ' + fmtMoney_(Number(req.total) - Number(req.available_at_submit)) + ' บาท</b>' : '') +
-    (req.note ? '<br>หมายเหตุ: ' + esc_(req.note) : '') + '</p>' + itemsTable_(items) + appLink_(id, 'เปิดระบบเพื่อตรวจ/อนุมัติ'));
+    '<p><b>' + esc_(id) + '</b> · ยอดรวม <b>' + fmtMoney_(req.total) + '</b> บาท (ไม่รวม VAT)</p><ul>' + lineHtml + '</ul>' +
+    (req.note ? '<p>หมายเหตุ: ' + esc_(req.note) + '</p>' : '') + itemsTable_(items) +
+    appLink_(id, 'เปิดระบบเพื่อตรวจ แล้วส่งอีเมลขออนุมัติผู้บริหาร'));
 }
 
 function fmtMoney_(n) {

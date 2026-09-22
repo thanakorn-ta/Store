@@ -268,7 +268,7 @@ function parseBudget(rows) {
     calc: ['Calculation'], company: ['Company'], division: ['Division'], mediaType: ['Media Type'], mediaGroup: ['Media Group'],
     location: ['Media Location'], expenseGroup: ['Expense Group'], gl: ['GL Code'],
     glName: [/^ประเภทของค่าใช้จ่าย/], year: ['Year'], month: ['Month Number'],
-    budget: ['Budget'], revise: ['Revise Budget'], actual: ['Actual']
+    budget: ['Budget'], revise: ['Revise Budget'], actual: ['Actual'], remark: ['Remark']
   });
   const lines = new Map();
   let skipped = 0;
@@ -289,7 +289,7 @@ function parseBudget(rows) {
         key, company, division: str(row[col.division]), media_type: str(row[col.mediaType]),
         media_group: str(row[col.mediaGroup]), media_location: location,
         expense_group: str(row[col.expenseGroup]), gl_code: gl, gl_name: str(row[col.glName]),
-        year: num(row[col.year]), month_number: month, budget: 0, revise_budget: 0, actual: 0, plan: 0
+        year: num(row[col.year]), month_number: month, budget: 0, revise_budget: 0, actual: 0, plan: 0, remarks: []
       });
     }
     const l = lines.get(k);
@@ -300,10 +300,12 @@ function parseBudget(rows) {
     l.revise_budget += revise;
     l.actual += num(row[col.actual]);
     l.plan += reviseCell !== '' ? revise : budget;
+    const remark = str(row[col.remark]);
+    if (remark && !l.remarks.includes(remark)) l.remarks.push(remark);
   }
   const round = n => Math.round(n * 100) / 100;
-  const out = [...lines.values()].map(l => ({
-    ...l, budget: round(l.budget), revise_budget: round(l.revise_budget), actual: round(l.actual), plan: round(l.plan)
+  const out = [...lines.values()].map(({ remarks, ...l }) => ({
+    ...l, remark: remarks.join(' / ').slice(0, 300), budget: round(l.budget), revise_budget: round(l.revise_budget), actual: round(l.actual), plan: round(l.plan)
   }));
   out.skipped = skipped; // rows with amounts but no GL Code / month — reported to the admin
   return out;

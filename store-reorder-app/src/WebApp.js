@@ -10,7 +10,7 @@
  */
 
 // Bump when deploying so <exec url>?health=1 shows which code the deployment runs
-var APP_VERSION = '2026-09-22b';
+var APP_VERSION = '2026-09-22c';
 
 function doGet(e) {
   // <exec url>?health=1 → JSON: quick check that the deployment runs this code (no sign-in needed)
