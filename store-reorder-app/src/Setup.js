@@ -56,7 +56,7 @@ function setup() {
 
   // 5. Deployment
   var url = webAppUrl_();
-  if (url) ok('ลิงก์ Web App: ' + url);
+  if (url) ok('ลิงก์ Web App: ' + url + ' — ตรวจว่า deployment รันโค้ดนี้: ' + url + '?health=1 ต้องได้ version ' + APP_VERSION + ' (ถ้าไม่ใช่ ให้ Deploy เวอร์ชันใหม่)');
   else bad('ยังไม่ได้ Deploy — การทำให้ใช้งานได้ > การทำให้ใช้งานได้รายการใหม่ > เว็บแอป (Execute as: Me, Who has access: Anyone)');
 
   var report = lines.join('\n');

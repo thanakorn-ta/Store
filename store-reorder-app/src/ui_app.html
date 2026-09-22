@@ -46,7 +46,17 @@ function save() {
 //   - page served by Apps Script itself  -> google.script.run.api(...)
 //   - page on GitHub Pages / Vercel       -> HTTPS POST to the Web App URL (doPost in src/Api.js)
 const GAS = typeof google !== 'undefined' && !!(google.script && google.script.run);
-const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycby9p8MjJMZIeOufAyn3C6G9j4W3Q5iJZlgOrzfgt0vSOZTBCzyDjuI8a0GaXQZQlW4D/exec';
+const DEFAULT_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycby9p8MjJMZIeOufAyn3C6G9j4W3Q5iJZlgOrzfgt0vSOZTBCzyDjuI8a0GaXQZQlW4D/exec';
+const API_URL_KEY = 'store-reorder-ai:api';
+// A new Apps Script deployment gets a new /exec URL — it can be set from the sign-in screen
+// (stored per browser) or with ?api=<url>, without editing this file.
+let APPS_SCRIPT_URL = (() => {
+  try {
+    const q = new URLSearchParams(location.search).get('api');
+    if (q && /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(q)) localStorage.setItem(API_URL_KEY, q);
+    return localStorage.getItem(API_URL_KEY) || DEFAULT_APPS_SCRIPT_URL;
+  } catch { return DEFAULT_APPS_SCRIPT_URL; }
+})();
 const SERVER = GAS || !!APPS_SCRIPT_URL;
 const TOKEN_KEY = 'store-reorder-ai:token';
 let token = (() => { try { return localStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; } })();
@@ -60,8 +70,17 @@ function rawCall(fn, args) {
   // text/plain keeps this a "simple" request (no CORS preflight, which Apps Script can't answer)
   return fetch(APPS_SCRIPT_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
     body: JSON.stringify({ token, fn, args }) })
-    .then(r => { if (!r.ok) throw new Error('เชื่อมต่อ server ไม่ได้ (' + r.status + ')'); return r.json(); })
-    .then(j => { if (!j.ok) throw new Error(j.error); return j.result; });
+    .catch(() => {
+      // The browser hides the reason; in practice it is Google's HTML error page (no CORS header)
+      const e = new Error('NETWORK'); e.network = true; throw e;
+    })
+    .then(r => r.text())
+    .then(t => {
+      let j;
+      try { j = JSON.parse(t); } catch { const e = new Error('NETWORK'); e.network = true; throw e; }
+      if (!j.ok) throw new Error(j.error);
+      return j.result;
+    });
 }
 
 const gasCall = (fn, ...args) => rawCall(fn, args).catch(e => {
@@ -680,7 +699,7 @@ let requests = [];
 
 const isMember = () => !!me && me.status === 'active' && !me.mustChange;
 const isAdmin = () => isMember() && me.role === 'admin';
-const errMsg = e => String((e && e.message) || e).replace(/^Error:\s*/, '').replace(/^SESSION_EXPIRED:\s*/, '');
+const errMsg = e => (e && e.network) ? 'เชื่อมต่อ Apps Script ไม่ได้ (ยังไม่ได้ Deploy เวอร์ชันใหม่ หรือสิทธิ์ไม่ใช่ "ทุกคน")' : String((e && e.message) || e).replace(/^Error:\s*/, '').replace(/^SESSION_EXPIRED:\s*/, '');
 
 function applySession(info) {
   // identity used to match Master PC owners / managers: email when set, else the ID (same rule as the server)
@@ -777,11 +796,39 @@ function renderGate() {
         applySession(res.user);
       }
     } catch (err) {
-      const msg = errMsg(err);
-      if ($('#gateErr')) $('#gateErr').textContent = msg + (/เชื่อมต่อ|fetch/i.test(msg) ? ' — ตรวจว่า Deploy Apps Script เวอร์ชันล่าสุดแล้ว และตั้งผู้มีสิทธิ์เข้าถึงเป็น "ทุกคน"' : '');
-      else toast(msg);
       btn.disabled = false;
+      if (err && err.network) { showConnectHelp(); return; }
+      if ($('#gateErr')) $('#gateErr').textContent = errMsg(err);
+      else toast(errMsg(err));
     }
+  });
+}
+
+/** Shown when the Apps Script backend can't be reached from a GitHub/Vercel page. */
+function showConnectHelp() {
+  const box = $('#gateErr');
+  if (!box) return;
+  const health = APPS_SCRIPT_URL + '?health=1';
+  box.classList.remove('over');
+  box.innerHTML = `<div class="connect-help">
+    <b class="over">เชื่อมต่อ Apps Script ไม่ได้</b> — ลิงก์ backend ยังไม่ได้รันโค้ดเวอร์ชันนี้ มักเกิดจาก:
+    <ol>
+      <li>บันทึกโค้ดแล้วแต่ยังไม่ได้ Deploy ใหม่: Apps Script &gt; การทำให้ใช้งานได้ &gt; จัดการการทำให้ใช้งานได้ &gt; ✏ &gt; เวอร์ชัน: <b>เวอร์ชันใหม่</b> &gt; ทำให้ใช้งานได้</li>
+      <li>ผู้มีสิทธิ์เข้าถึงไม่ใช่ <b>"ทุกคน"</b> (Anyone) · เรียกใช้ในฐานะ: <b>ฉัน</b></li>
+      <li>สร้าง deployment ใหม่ทำให้ลิงก์ /exec เปลี่ยน — ใส่ลิงก์ใหม่ด้านล่าง</li>
+    </ol>
+    ตรวจได้ที่ <a href="${esc(health)}" target="_blank" rel="noopener">${esc(health)}</a> — ต้องเห็น <code>"app":"store-reorder-ai"</code>
+    <form id="apiForm" class="inline-form" style="margin-top:8px">
+      <input name="url" value="${esc(APPS_SCRIPT_URL)}" style="flex:1 1 360px" placeholder="https://script.google.com/macros/s/…/exec">
+      <button class="btn sm">บันทึกลิงก์</button>
+    </form></div>`;
+  $('#apiForm').addEventListener('submit', e => {
+    e.preventDefault();
+    const url = e.target.url.value.trim();
+    if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(url)) return toast('ลิงก์ต้องเป็น https://script.google.com/macros/s/…/exec');
+    APPS_SCRIPT_URL = url;
+    try { url === DEFAULT_APPS_SCRIPT_URL ? localStorage.removeItem(API_URL_KEY) : localStorage.setItem(API_URL_KEY, url); } catch { /* ignore */ }
+    toast('บันทึกลิงก์แล้ว ลองเข้าสู่ระบบอีกครั้ง');
   });
 }
 
