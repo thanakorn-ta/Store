@@ -354,6 +354,19 @@
               <div class="wide"><button class="btn sm" type="submit">บันทึกการตั้งค่า</button> <span id="settingsStatus" class="hint"></span></div>
             </form>
           </section>
+          <section class="panel" id="pwPanel">
+            <h3>รหัสผ่านเข้าใช้งาน — Admin และ User ทุกคน</h3>
+            <p class="hint">ระบบเก็บรหัสผ่านแบบเข้ารหัส (hash) จึงย้อนดูรหัสเดิมของใครไม่ได้เลย — ถ้าต้องการรหัสที่ "เห็นได้"
+              ให้กดสร้างรหัสใหม่ แล้วระบบจะแสดงรหัสนั้นบนหน้านี้ทันที คัดลอกไปแจ้งผู้ใช้ได้</p>
+            <div class="pw-actions">
+              <button id="btnPwAll" class="btn sm">สร้างรหัสใหม่ให้ทุกคน</button>
+              <button id="btnPwCopy" class="btn sm ghost">คัดลอกรายการ ID + รหัส</button>
+              <label class="pw-chk"><input type="checkbox" id="pwForce"> บังคับให้ผู้ใช้เปลี่ยนรหัสเองตอนเข้าครั้งแรก
+                (ถ้าติ๊ก รหัสด้านล่างจะใช้ได้ครั้งเดียว)</label>
+            </div>
+            <div class="table-wrap" style="max-height:none"><table id="tblPasswords" class="grid"></table></div>
+            <p class="hint">รหัสที่แสดงอยู่บนหน้าจอนี้เท่านั้น ไม่ได้บันทึกเป็นข้อความในฐานข้อมูล — ปิดหน้าเว็บแล้วจะไม่เห็นอีก ต้องสร้างใหม่</p>
+          </section>
           <div class="admin-grid">
             <section class="panel">
               <h3>สมาชิก</h3>

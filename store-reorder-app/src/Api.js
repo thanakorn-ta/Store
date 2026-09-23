@@ -24,7 +24,7 @@ var MEMBER_FNS = [
   'recallRequest', 'returnForEdit', 'adminUpdateRequest', 'deleteRequest', 'getQuoteFile',
   'listMyRequests', 'listAllRequests', 'installReminderTrigger',
   // admin
-  'listMembers', 'saveMember', 'listMasterPc', 'saveMasterPc',
+  'listMembers', 'saveMember', 'resetMemberPassword', 'resetMemberPasswords', 'listMasterPc', 'saveMasterPc',
   // AI
   'askClaudeFromUi'
 ];

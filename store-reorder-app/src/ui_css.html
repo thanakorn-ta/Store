@@ -578,4 +578,17 @@ dialog.outbox::backdrop { background: rgba(0, 0, 0, .35); }
 
 .req-sel { width: 16px; height: 16px; accent-color: var(--admin); margin-right: 2px; flex: none; }
 .panel-actions .btn.danger { color: var(--bad); }
+
+/* ---- passwords the admin can read (admin tab) + show/hide on every password box */
+.pw-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
+.pw-chk { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.pw-code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 15px; font-weight: 700;
+  letter-spacing: .5px; background: #fff7d6; border: 1px solid #e6cf7a; border-radius: 6px; padding: 3px 8px; user-select: all; }
+.role-pill.sm { font-size: 11px; padding: 1px 8px; }
+.pw-wrap { position: relative; display: inline-flex; align-items: center; }
+.pw-wrap > input { width: 100%; padding-right: 32px; }
+.eye-btn { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); border: 0; background: none;
+  cursor: pointer; font-size: 14px; line-height: 1; opacity: .45; padding: 4px; }
+.eye-btn:hover, .eye-btn.on { opacity: 1; }
+.gate-form .pw-wrap { display: flex; }
 </style>

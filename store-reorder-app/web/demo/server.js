@@ -105,7 +105,7 @@ var MEMBER_FNS = [
   'recallRequest', 'returnForEdit', 'adminUpdateRequest', 'deleteRequest', 'getQuoteFile',
   'listMyRequests', 'listAllRequests', 'installReminderTrigger',
   // admin
-  'listMembers', 'saveMember', 'listMasterPc', 'saveMasterPc',
+  'listMembers', 'saveMember', 'resetMemberPassword', 'resetMemberPasswords', 'listMasterPc', 'saveMasterPc',
   // AI
   'askClaudeFromUi'
 ];
@@ -1470,6 +1470,58 @@ function saveMember(input) {
   }
   logActivity_('saveMember', 'ok', me.id + ' -> ' + username + ' ' + role + '/' + status + (input.password ? ' +password' : ''));
   return listMembers();
+}
+
+// ------------------------------------------------------------ admin: passwords you can read
+
+/**
+ * Passwords are stored salted + hashed, so nobody - not even an admin - can read an existing one.
+ * To hand a login out, the admin sets a new password here and the page shows it once:
+ *   resetMemberPassword({ username, password?, forceChange? }) -> { username, name, email, role, password }
+ * password  omitted -> the system makes an easy-to-read one
+ * forceChange true  -> the user must change it at the next login (default: keep it, so the list stays valid)
+ */
+var PW_SAFE_ = 'abcdefghijkmnpqrstuvwxyz23456789'; // no l/o/0/1 - they get misread when passed around
+
+function randomPassword_(len) {
+  var n = len || 10, out = '';
+  for (var i = 0; i < n; i++) out += PW_SAFE_.charAt(Math.floor(Math.random() * PW_SAFE_.length));
+  return out.slice(0, 4) + '-' + out.slice(4); // store-1 like grouping reads better over the phone
+}
+
+function resetMemberPassword(input) {
+  var me = requireAdmin_();
+  input = input || {};
+  var username = String(input.username || '').trim().toLowerCase();
+  var password = input.password ? String(input.password) : randomPassword_(10);
+  if (input.password) checkNewPassword_(password);
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  var m;
+  try {
+    var ss = db_();
+    m = readMembers_(ss).filter(function (x) { return x.username === username; })[0];
+    if (!m) throw new Error('ไม่พบสมาชิก ' + username);
+    var salt = newSalt_();
+    writeMemberFields_(ss, m.row, { pw_hash: hashPassword_(password, salt), pw_salt: salt,
+      must_change: input.forceChange === true, updated_at: new Date(), updated_by: me.id });
+  } finally {
+    lock.releaseLock();
+  }
+  logActivity_('resetMemberPassword', 'ok', me.id + ' -> ' + username); // never log the password itself
+  return { username: m.username, name: m.name, email: m.email, role: m.role, status: m.status,
+    password: password, mustChange: input.forceChange === true };
+}
+
+/** Same, for several accounts at once: { usernames: [...], forceChange? } -> [ { username, password, ... } ] */
+function resetMemberPasswords(input) {
+  requireAdmin_();
+  input = input || {};
+  var names = input.usernames && input.usernames.length ? input.usernames
+    : listMembers().map(function (m) { return m.username; });
+  return names.map(function (u) {
+    return resetMemberPassword({ username: u, forceChange: input.forceChange === true });
+  });
 }
 
 // ============================================================ MinMax.js

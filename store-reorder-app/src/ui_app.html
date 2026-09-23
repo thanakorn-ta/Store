@@ -2198,6 +2198,7 @@ async function renderAdmin() {
       <td class="nowrap">${m.status === 'pending' ? '<button class="btn sm" data-save="approve">อนุมัติ</button> ' : ''}<button class="btn sm ghost" data-save="1">บันทึก</button>
         <button class="btn sm ghost" data-save="reset">ตั้งรหัสใหม่</button></td>
     </tr>`).join('')}</tbody>`;
+  renderPasswords();
 }
 
 $('#tblMembers').addEventListener('click', async e => {
@@ -2418,6 +2419,109 @@ $('#btnBudgetDrive').addEventListener('click', async () => {
   catch (e) { toast('นำเข้าไม่สำเร็จ: ' + errMsg(e)); renderAdmin(); }
   finally { btn.disabled = false; }
 });
+
+// ------------------------------------------------------------ admin: passwords the admin can actually read
+// The sheet only keeps a salted hash, so an existing password can never be shown again.
+// What the admin can do is set a new one - and that one is shown here (this page only, in memory).
+
+const pwShown = new Map(); // username -> { password, at, mustChange }
+
+function pwForce() { return $('#pwForce') && $('#pwForce').checked; }
+
+function renderPasswords() {
+  const t = $('#tblPasswords');
+  if (!t) return;
+  if (!members) { t.innerHTML = '<tbody><tr><td class="empty">กำลังโหลด…</td></tr></tbody>'; return; }
+  const order = { admin: 0, user: 1 };
+  const list = [...members].sort((a, b) => order[a.role] - order[b.role] || a.username.localeCompare(b.username));
+  t.innerHTML = `<thead><tr><th>ID เข้าระบบ</th><th>ชื่อ</th><th>สิทธิ์</th><th>สถานะ</th><th>รหัสผ่าน</th><th></th></tr></thead>
+    <tbody>${list.map(m => {
+      const s = pwShown.get(m.username);
+      return `<tr data-user="${esc(m.username)}">
+        <td class="sku">${esc(m.username)}</td>
+        <td>${esc(m.name || '')}</td>
+        <td><span class="role-pill sm ${m.role === 'admin' ? 'admin' : 'user'}">${m.role === 'admin' ? 'Admin' : 'User'}</span></td>
+        <td>${{ pending: 'รออนุมัติ', active: 'ใช้งาน', disabled: 'ระงับ' }[m.status] || esc(m.status)}</td>
+        <td>${s ? `<code class="pw-code">${esc(s.password)}</code>${s.mustChange ? '<div class="pc">ต้องเปลี่ยนตอนเข้าครั้งแรก</div>' : ''}`
+          : '<span class="hint">เข้ารหัสไว้ — ดูไม่ได้ กดสร้างรหัสใหม่เพื่อให้เห็น</span>'}</td>
+        <td class="nowrap">${s ? '<button class="btn sm ghost" data-pw="copy">คัดลอก</button> ' : ''}<button class="btn sm" data-pw="new">สร้างรหัสใหม่</button></td>
+      </tr>`;
+    }).join('')}</tbody>`;
+}
+
+function pwLines() {
+  return [...pwShown.entries()].map(([u, s]) => {
+    const m = (members || []).find(x => x.username === u) || {};
+    return `${u}\t${s.password}\t${m.role === 'admin' ? 'Admin' : 'User'}\t${m.name || ''}`;
+  });
+}
+
+async function copyText(text, okMsg) {
+  try { await navigator.clipboard.writeText(text); toast(okMsg); }
+  catch { prompt('คัดลอกข้อความนี้:', text); } // clipboard blocked (http / iframe)
+}
+
+$('#tblPasswords').addEventListener('click', async e => {
+  const btn = e.target.closest('[data-pw]');
+  if (!btn) return;
+  const username = btn.closest('tr').dataset.user;
+  if (btn.dataset.pw === 'copy') {
+    const s = pwShown.get(username);
+    return s && copyText(`${username} / ${s.password}`, 'คัดลอก ID + รหัสผ่านแล้ว');
+  }
+  if (!confirm(`สร้างรหัสผ่านใหม่ให้ ${username}?\nรหัสเดิมจะใช้ไม่ได้ทันที`)) return;
+  btn.disabled = true;
+  try {
+    const r = await gasCall('resetMemberPassword', { username, forceChange: pwForce() });
+    pwShown.set(r.username, { password: r.password, mustChange: r.mustChange, at: Date.now() });
+    members = null; await renderAdmin();
+    toast(`รหัสใหม่ของ ${r.username} คือ ${r.password}`);
+  } catch (err) { toast('สร้างไม่สำเร็จ: ' + errMsg(err)); btn.disabled = false; }
+});
+
+$('#btnPwAll').addEventListener('click', async e => {
+  if (!confirm('สร้างรหัสผ่านใหม่ให้สมาชิกทุกคน?\nรหัสเดิมของทุกคน (รวมบัญชีที่คุณใช้อยู่) จะใช้ไม่ได้ทันที')) return;
+  e.target.disabled = true;
+  try {
+    const rows = await gasCall('resetMemberPasswords', { forceChange: pwForce() });
+    rows.forEach(r => pwShown.set(r.username, { password: r.password, mustChange: r.mustChange, at: Date.now() }));
+    members = null; await renderAdmin();
+    toast(`สร้างรหัสใหม่ให้ ${rows.length} บัญชีแล้ว — คัดลอกเก็บไว้ก่อนปิดหน้าเว็บ`);
+  } catch (err) { toast('สร้างไม่สำเร็จ: ' + errMsg(err)); }
+  e.target.disabled = false;
+});
+
+$('#btnPwCopy').addEventListener('click', () => {
+  const lines = pwLines();
+  if (!lines.length) return toast('ยังไม่มีรหัสที่แสดงอยู่ — กด "สร้างรหัสใหม่" ก่อน');
+  copyText('ID\tรหัสผ่าน\tสิทธิ์\tชื่อ\n' + lines.join('\n'), `คัดลอก ${lines.length} บัญชีแล้ว`);
+});
+
+// 👁 on every password box, so what you type (or paste) can be checked before sending
+function enhancePasswords(root) {
+  (root || document).querySelectorAll('input[type="password"]').forEach(inp => {
+    if (inp.dataset.eye) return;
+    inp.dataset.eye = '1';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'eye-btn';
+    btn.title = 'แสดง/ซ่อนรหัสผ่าน';
+    btn.textContent = '👁';
+    btn.addEventListener('click', () => {
+      const show = inp.type === 'password';
+      inp.type = show ? 'text' : 'password';
+      btn.classList.toggle('on', show);
+      inp.focus();
+    });
+    const wrap = document.createElement('span');
+    wrap.className = 'pw-wrap';
+    inp.parentNode.insertBefore(wrap, inp);
+    wrap.appendChild(inp);
+    wrap.appendChild(btn);
+  });
+}
+new MutationObserver(() => enhancePasswords()).observe(document.body, { childList: true, subtree: true });
+enhancePasswords();
 
 // ------------------------------------------------------------ boot
 
