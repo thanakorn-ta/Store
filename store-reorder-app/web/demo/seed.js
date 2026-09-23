@@ -91,6 +91,25 @@
       { sku: 'ST-1002', name: 'กล่องคอนโทรล SPDE120A', pc: 'PC-MTR', pcName: 'Metro Poster', unit: 'กล่อง', qty: 2, unitCost: 8500, note: 'Spare Part ซ่อมบำรุง', budgetKey: B, month: 10, storeBalance: 2 },
       { sku: 'ST-1004', name: 'สีสเปรย์ เทา', pc: 'PC-MTR', pcName: 'Metro Poster', unit: 'กระป๋อง', qty: 6, unitCost: 85, note: 'พ่นโครงเหล็ก', budgetKey: A, month: 10, storeBalance: 12 }
     ], files: [{ name: 'ใบเสนอราคา-ตัวอย่าง.pdf', type: 'application/pdf', data: quote }] }));
+    // ตัวอย่างที่ออก PR/PO แล้ว: ของชิ้นหนึ่งมาแล้ว (ช้ากว่ากำหนด 2 วัน) อีกชิ้นยังไม่มาและเลยกำหนด
+    const day = n => new Date(Date.now() + n * 86400000);
+    const shipped = as('user', () => submitOrderRequest({ note: 'ตัวอย่าง: ออก PR/PO แล้ว รอของ', items: [
+      { sku: 'ST-2001', name: 'หลอดไฟ LED T8 18W', pc: 'PC-BTS', pcName: 'BTS Pillar', unit: 'หลอด', qty: 20, unitCost: 120, note: 'เปลี่ยนหลอดป้าย', budgetKey: B, month: 9, storeBalance: 25 },
+      { sku: 'ST-1005', name: 'Main Controller', pc: 'PC-MTR', pcName: 'Metro Poster', unit: 'ตัว', qty: 1, unitCost: 10000, note: 'สำรองกล่องคอนโทรล', budgetKey: B, month: 9, storeBalance: 2 }
+    ] }));
+    as('admin', () => {
+      sendApprovalEmail(shipped.id, { to: 'thanakorn@planbmedia.co.th' });
+      recordApproval(shipped.id, true, 'Approved (ตัวอย่าง)');
+      savePrPo(shipped.id, { rows: [{ row: 0, sku: 'ST-2001' }], pr: 'PR-2569-014', po: 'PO-2569-021', eta: '' });
+      savePrPo(shipped.id, { rows: [{ row: 1, sku: 'ST-1005' }], pr: 'PR-2569-015', po: 'PO-2569-022', eta: '' });
+      // ย้อนวันให้ดูเหมือนสั่งไปแล้วสิบกว่าวัน จะได้มีตัวเลขให้หน้า "ติดตามการส่งของ" วิเคราะห์
+      updateItems_(ss, shipped.id, item => {
+        item.po_at = day(-12);
+        if (item.sku === 'ST-2001') { item.eta_date = day(-5); item.received_at = day(-3); }
+        else item.eta_date = day(-1);
+        return item;
+      });
+    });
     M.mail.length = 0; // start with an empty outbox
   }
 

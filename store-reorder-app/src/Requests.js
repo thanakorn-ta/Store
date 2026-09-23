@@ -35,7 +35,7 @@ var REQUEST_HEADER = ['request_id', 'created_at', 'source', 'round_id', 'pc_code
   'approved_by', 'approved_at', 'approval_note', 'purchasing_sent_at', 'po_no', 'po_at', 'received_at'];
 var REQUEST_ITEM_HEADER = ['request_id', 'sku', 'name', 'pc_code', 'pc_name', 'unit', 'suggested_qty', 'qty',
   'unit_cost', 'amount', 'note', 'budget_key', 'budget_label', 'budget_year', 'budget_month', 'store_balance',
-  'over_budget', 'over_reason'];
+  'over_budget', 'over_reason', 'pr_no', 'po_no', 'po_at', 'eta_date', 'received_at'];
 var PR_LOG_HEADER = ['created_at', 'request_id', 'po_no', 'pc_code', 'budget_key', 'budget_year', 'month_number', 'amount', 'issued_by'];
 
 var STATUS = {
@@ -629,9 +629,10 @@ function issuePo(id, poNo) {
   if (!poNo) throw new Error('กรุณาใส่เลข PR/PO');
   setRequestFields_(ss, id, { status: STATUS.PO, po_no: poNo, po_at: new Date() });
   // Commit spend per PC x budget line x month (Budget.js / checkBudget_ reads pr_po_log)
+  // Items that already carry their own PO number were committed by savePrPo (Delivery.js).
   var groups = {};
   readItems_(ss, id).forEach(function (i) {
-    if (!(i.qty > 0)) return;
+    if (!(i.qty > 0) || String(i.po_no || '').trim()) return;
     var key = i.budget_key || req.budget_key, m = i.budget_month || Number(req.budget_month);
     var g = groups[i.pc_code + '|' + key + '|' + m] = groups[i.pc_code + '|' + key + '|' + m] ||
       { pc: i.pc_code, key: key, month: m, year: i.budget_year || req.budget_year, amount: 0 };
@@ -642,6 +643,11 @@ function issuePo(id, poNo) {
     return { created_at: new Date(), request_id: id, po_no: poNo, pc_code: g.pc, budget_key: g.key,
       budget_year: g.year, month_number: g.month, amount: round2_(g.amount), issued_by: me.email };
   }));
+  var stamp = new Date();
+  updateItems_(ss, id, function (item) { // เลขเดียวกันทั้งคำขอ — แยกรายชิ้นได้ที่ Delivery.js
+    if (Number(item.qty) > 0 && !String(item.po_no || '').trim()) { item.po_no = poNo; item.po_at = stamp; }
+    return item;
+  });
   mailPeople_(requestPeople_(req), '[Store Reorder] ' + id + ' ออก PR/PO แล้ว: ' + poNo,
     'คำขอ ' + esc_(id) + ' ออก PR/PO เลขที่ <b>' + esc_(poNo) + '</b> แล้ว' + appLink_(id));
   logActivity_('issuePo', 'ok', id + ' ' + poNo + ' by ' + me.email);
@@ -653,8 +659,13 @@ function markReceived(id, note) {
   var ss = db_();
   var req = findRequest_(ss, id);
   if (req.status !== STATUS.PO) throw new Error('บันทึกรับของได้เฉพาะคำขอที่ออก PR/PO แล้ว');
-  setRequestFields_(ss, id, { status: STATUS.RECEIVED, received_at: new Date(),
+  var now = new Date();
+  setRequestFields_(ss, id, { status: STATUS.RECEIVED, received_at: now,
     admin_note: [req.admin_note, note].filter(String).join(' | ').slice(0, 500) });
+  updateItems_(ss, id, function (item) { // ของที่ยังไม่ได้ติ๊กรับรายชิ้น ถือว่ามาพร้อมกันวันนี้
+    if (Number(item.qty) > 0 && !item.received_at) item.received_at = now;
+    return item;
+  });
   mailPeople_(requestPeople_(req), '[Store Reorder] ' + id + ' ของเข้าแล้ว',
     'สินค้าตามคำขอ ' + esc_(id) + ' (PR/PO ' + esc_(req.po_no) + ') รับเข้า Store แล้ว' + appLink_(id));
   logActivity_('markReceived', 'ok', id + ' by ' + me.email);
@@ -735,7 +746,10 @@ function toClientItem_(i) {
     amount: Number(i.amount), note: String(i.note || ''), budget_key: String(i.budget_key || ''),
     budget_label: String(i.budget_label || ''), budget_year: Number(i.budget_year) || 0, budget_month: Number(i.budget_month) || 0,
     store_balance: i.store_balance === '' || i.store_balance == null ? '' : Number(i.store_balance),
-    over_budget: String(i.over_budget || ''), over_reason: String(i.over_reason || '') };
+    over_budget: String(i.over_budget || ''), over_reason: String(i.over_reason || ''),
+    // PR/PO + การส่งของ รายชิ้น (Delivery.js)
+    pr_no: String(i.pr_no || ''), po_no: String(i.po_no || ''), po_at: dayString_(i.po_at),
+    eta_date: dayString_(i.eta_date), received_at: dayString_(i.received_at) };
 }
 
 /** google.script.run can't return Date objects — convert to strings. */

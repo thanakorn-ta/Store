@@ -607,4 +607,22 @@ td.bud .pc { font-weight: 400; }
 .ps-row.over { background: #fff1f0; }
 .ps-row.over .num { color: var(--danger, #c0392b); }
 .ps-row.warn { background: #fff8e6; }
+
+/* ---- PR/PO + ติดตามการส่งของ */
+.dlv { margin-top: 10px; border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; background: var(--surface); }
+.dlv > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
+.dlv-tbl tr.done { background: #f3fbf5; }
+.dlv-tbl tr.is-late, #tblDelivery tr.is-late { background: #fff1f0; }
+.dlv-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin-top: 10px; }
+.dlv-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.dlv-form input { min-width: 150px; }
+.dlv-form .hint { flex-basis: 100%; margin: 0; }
+.ok-txt { color: #1e874b; }
+.dlv-an { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.an-box { background: var(--surface-2); border-radius: 12px; padding: 12px 14px; }
+.an-box h4 { margin: 0 0 6px; font-size: 13px; color: var(--muted); font-weight: 600; }
+.an-big { margin: 0; font-size: 26px; font-weight: 700; letter-spacing: -.5px; }
+.an-list { margin: 0; padding-left: 18px; font-size: 13px; }
+.an-list li { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; }
+.an-list .num { white-space: nowrap; font-variant-numeric: tabular-nums; }
 </style>

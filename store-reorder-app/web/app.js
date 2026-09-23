@@ -418,6 +418,7 @@ function renderActive() {
   else if (activeTab === 'requests') loadRequests();
   else if (activeTab === 'admin') { members = null; renderAdmin(); } // always fresh: sign-ups arrive any time
   else if (activeTab === 'budget') renderBudget();
+  else if (activeTab === 'delivery') { renderDelivery(); loadRequests(); }
 }
 
 // ------------------------------------------------------------ compare table
@@ -1537,7 +1538,9 @@ async function loadRequests(badgeOnly = false) {
   try { requests = await gasCall('listMyRequests'); }
   catch (e) { $('#reqInfo').textContent = 'โหลดไม่ได้: ' + errMsg(e); return; }
   updateReqBadge();
+  updateDlvBadge();
   if (!badgeOnly || activeTab === 'requests') renderRequests();
+  if (activeTab === 'delivery') renderDelivery();
 }
 
 function updateReqBadge() {
@@ -1791,6 +1794,7 @@ function renderReqCard(r) {
     ${r.po_no ? `<div class="req-meta">PR/PO: <b>${esc(r.po_no)}</b> ${esc(r.po_at)}${r.received_at ? ' · รับของ ' + esc(r.received_at) : ''}</div>` : ''}
     ${editing && editingReq.mode === 'pc' ? renderConfirmForm(r) : editing && editingReq.mode === 'admin' ? renderAdminEditForm(r)
       : `<details ${admin && r.status === ST.PENDING ? 'open' : ''}><summary>ดูรายการสินค้า (${r.items.length})</summary>${reqItemsTable(r, false)}</details>`}
+    ${deliveryPanel(r)}
     ${isComposing ? renderComposer(r) : ''}
     ${acts.length && !editing && !isComposing ? `<div class="req-actions">${acts.join('')}</div>` : ''}
   </div>`;
@@ -2579,6 +2583,233 @@ function enhancePasswords(root) {
 }
 new MutationObserver(() => enhancePasswords()).observe(document.body, { childList: true, subtree: true });
 enhancePasswords();
+
+// ------------------------------------------------------------ PR/PO + ติดตามการส่งของ (server: src/Delivery.js)
+// ของในคำขอเดียวกันอาจอยู่คนละ PR/PO และมาคนละวัน จึงเก็บ pr_no / po_no / po_at / eta_date / received_at รายชิ้น
+
+const DAY_MS = 86400000;
+const todayISO = () => new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+const parseISO = s => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s || '')); return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null; };
+/** จำนวนวันจาก a ถึง b (บวก = b อยู่หลัง a) */
+function daysBetween(a, b) {
+  const x = parseISO(a), y = parseISO(b);
+  return x && y ? Math.round((y - x) / DAY_MS) : null;
+}
+const addDays = (iso, n) => { const d = parseISO(iso); if (!d) return ''; d.setDate(d.getDate() + n); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+const thaiDay = iso => { const d = parseISO(iso); return d ? `${d.getDate()} ${MONTH_SHORT[d.getMonth()]}` : ''; };
+
+/** ทุกรายการสินค้าที่ออก PR/PO แล้ว พร้อมตัวเลขที่ใช้วิเคราะห์ */
+function deliveryItems() {
+  const out = [];
+  for (const r of requests) {
+    if (![ST.PO, ST.RECEIVED, ST.APPROVED].includes(r.status)) continue;
+    (r.items || []).forEach((i, n) => {
+      if (!(Number(i.qty) > 0) || !(i.po_no || i.pr_no)) return;
+      const lead = daysBetween(i.po_at, i.received_at);      // ใช้เวลาส่งจริงกี่วัน
+      const vsEta = daysBetween(i.eta_date, i.received_at);  // + = มาช้ากว่ากำหนด
+      const lateBy = i.received_at ? null : daysBetween(i.eta_date, todayISO());
+      out.push({ r, i, row: n, lead, vsEta, lateBy,
+        late: i.received_at ? vsEta > 0 : lateBy > 0,
+        open: !i.received_at, amount: Number(i.amount) || 0 });
+    });
+  }
+  return out;
+}
+
+/** เฉลี่ย / กลาง / p90 ของระยะเวลาส่ง + อัตราตรงเวลา — ใช้ทั้งประมาณ ETA และหน้าวิเคราะห์ */
+function deliveryStats(list) {
+  const done = list.filter(x => x.lead != null && x.lead >= 0);
+  const leads = done.map(x => x.lead).sort((a, b) => a - b);
+  const pick = p => leads.length ? leads[Math.min(leads.length - 1, Math.floor(leads.length * p))] : null;
+  const withEta = done.filter(x => x.vsEta != null);
+  const onTime = withEta.filter(x => x.vsEta <= 0);
+  const lateOnes = withEta.filter(x => x.vsEta > 0);
+  return {
+    n: list.length, done: done.length,
+    open: list.filter(x => x.open).length,
+    openAmt: list.filter(x => x.open).reduce((a, x) => a + x.amount, 0),
+    lateOpen: list.filter(x => x.open && x.late).length,
+    avg: leads.length ? leads.reduce((a, b) => a + b, 0) / leads.length : null,
+    median: pick(0.5), p90: pick(0.9), max: leads.length ? leads[leads.length - 1] : null,
+    onTimePct: withEta.length ? Math.round(onTime.length / withEta.length * 100) : null,
+    lateN: lateOnes.length, avgLate: lateOnes.length ? lateOnes.reduce((a, x) => a + x.vsEta, 0) / lateOnes.length : null
+  };
+}
+
+/** วันที่ควรได้ของ = วันออก PO + ระยะเวลาที่เคยส่งได้จริง (ยังไม่มีประวัติ → 14 วัน) */
+function suggestEta(poAt) {
+  const s = deliveryStats(deliveryItems());
+  const days = Math.round(s.p90 != null ? s.p90 : (s.avg != null ? s.avg : 14));
+  return { date: addDays(poAt || todayISO(), days), days, from: s.done ? `จากของ ${s.done} รายการที่รับมาแล้ว` : 'ค่าเริ่มต้น 14 วัน' };
+}
+
+function groupDelivery(list, keyOf, labelOf) {
+  const g = new Map();
+  for (const x of list) {
+    const k = keyOf(x);
+    if (!g.has(k)) g.set(k, { key: k, label: labelOf(x), items: [] });
+    g.get(k).items.push(x);
+  }
+  return [...g.values()].map(x => ({ ...x, s: deliveryStats(x.items) }));
+}
+
+// ---- การ์ดคำขอ: ตาราง PR/PO + รับของ รายชิ้น (ติ๊กทีละรายการ หรือหลายรายการที่ใช้เลขเดียวกัน)
+
+function deliveryPanel(r) {
+  if (!isAdmin() || ![ST.APPROVED, ST.PO, ST.RECEIVED].includes(r.status)) return '';
+  const items = (r.items || []).map((i, n) => ({ i, n })).filter(x => Number(x.i.qty) > 0);
+  if (!items.length) return '';
+  const withPo = items.filter(x => x.i.po_no).length;
+  const got = items.filter(x => x.i.received_at).length;
+  const late = items.filter(x => !x.i.received_at && daysBetween(x.i.eta_date, todayISO()) > 0).length;
+  const sug = suggestEta(items.map(x => x.i.po_at).find(Boolean) || todayISO());
+  return `<details class="dlv" ${r.status !== ST.RECEIVED ? 'open' : ''} data-dlv="${esc(r.request_id)}">
+    <summary>PR/PO และการรับของ — มีเลข PO ${withPo}/${items.length} · รับแล้ว ${got}/${items.length}${late ? ` · <span class="over">เลยกำหนด ${late}</span>` : ''}</summary>
+    <div class="table-wrap" style="max-height:none"><table class="grid dlv-tbl"><thead><tr>
+      <th><input type="checkbox" data-dall aria-label="เลือกทุกรายการ"></th><th>สินค้า</th><th class="n">จำนวน</th><th class="n">รวม</th>
+      <th>เลข PR</th><th>เลข PO</th><th>กำหนดส่ง</th><th>รับจริง</th><th>ระยะการส่ง</th>
+    </tr></thead><tbody>${items.map(({ i, n }) => {
+      const lead = daysBetween(i.po_at, i.received_at);
+      const vsEta = daysBetween(i.eta_date, i.received_at);
+      const lateBy = i.received_at ? null : daysBetween(i.eta_date, todayISO());
+      return `<tr data-row="${n}" data-sku="${esc(i.sku)}" class="${i.received_at ? 'done' : lateBy > 0 ? 'is-late' : ''}">
+        <td><input type="checkbox" data-drow aria-label="เลือก ${esc(i.name)}"></td>
+        <td class="name">${esc(i.name)}<div class="pc">${esc(i.pc_code)} · ${esc(String(i.sku).startsWith('NEW-') ? 'รายการใหม่' : i.sku)}</div></td>
+        <td class="n">${fmt(i.qty)} ${esc(i.unit)}</td><td class="n">${money(i.amount)}</td>
+        <td class="small">${i.pr_no ? esc(i.pr_no) : '<span class="dim">–</span>'}</td>
+        <td class="small">${i.po_no ? `<b>${esc(i.po_no)}</b>${i.po_at ? `<div class="pc">ออก ${esc(thaiDay(i.po_at))}</div>` : ''}` : '<span class="dim">ยังไม่ออก</span>'}</td>
+        <td class="small">${i.eta_date ? esc(thaiDay(i.eta_date)) : '<span class="dim">–</span>'}</td>
+        <td class="small">${i.received_at ? esc(thaiDay(i.received_at))
+          : `<span class="${lateBy > 0 ? 'over' : 'dim'}">${lateBy > 0 ? `เลย ${lateBy} วัน` : lateBy != null ? `อีก ${-lateBy} วัน` : 'ยังไม่มา'}</span>`}</td>
+        <td class="small">${lead != null ? `${lead} วัน ${vsEta == null ? '' : vsEta > 0 ? `<span class="over">ช้า ${vsEta} วัน</span>` : '<span class="ok-txt">ตรงเวลา</span>'}` : '<span class="dim">–</span>'}</td>
+      </tr>`;
+    }).join('')}</tbody></table></div>
+    <div class="dlv-form">
+      <label>เลข PR<input data-dpr placeholder="PR-…"></label>
+      <label>เลข PO<input data-dpo placeholder="PO-…"></label>
+      <label>กำหนดส่ง (ประมาณ)<input type="date" data-deta value="${esc(sug.date)}"></label>
+      <button class="btn sm" data-dact="save">บันทึก PR/PO ให้รายการที่เลือก</button>
+      <label>วันที่รับของ<input type="date" data-ddate value="${esc(todayISO())}"></label>
+      <button class="btn sm ghost" data-dact="receive">รับของแล้ว (รายการที่เลือก)</button>
+      <p class="hint">ติ๊กทีละรายการ หรือติ๊กหลายรายการที่ใช้เลข PR/PO เดียวกันแล้วกดบันทึกครั้งเดียว ·
+        กำหนดส่งที่เติมให้ = วันออก PO + ${sug.days} วัน (${esc(sug.from)}) แก้เองได้ ·
+        รายการที่เพิ่งได้เลข PO จะถูกตัดงบทันที · คำขอจะเป็น "รับของแล้ว" เมื่อของมาครบทุกรายการ</p>
+    </div>
+  </details>`;
+}
+
+document.addEventListener('change', e => {
+  const all = e.target.closest('[data-dall]');
+  if (!all) return;
+  all.closest('table').querySelectorAll('[data-drow]').forEach(c => { c.checked = all.checked; });
+});
+
+document.addEventListener('click', async e => {
+  const btn = e.target.closest('[data-dact]');
+  if (!btn) return;
+  const box = btn.closest('[data-dlv]');
+  const id = box.dataset.dlv;
+  const rows = [...box.querySelectorAll('tbody tr')].filter(tr => tr.querySelector('[data-drow]').checked)
+    .map(tr => ({ row: Number(tr.dataset.row), sku: tr.dataset.sku }));
+  if (!rows.length) return toast('ติ๊กเลือกรายการสินค้าก่อน');
+  const v = sel => box.querySelector(sel).value.trim();
+  let call, done;
+  if (btn.dataset.dact === 'save') {
+    const pr = v('[data-dpr]'), po = v('[data-dpo]'), eta = v('[data-deta]');
+    if (!pr && !po && !eta) return toast('ใส่เลข PR หรือ PO หรือกำหนดส่งก่อน');
+    if (po && !confirm(`ใส่เลข PO ${po} ให้ ${rows.length} รายการ?\nรายการที่ยังไม่มีเลข PO จะถูกตัดงบทันที`)) return;
+    call = () => gasCall('savePrPo', id, { rows, pr, po, eta });
+    done = `บันทึก PR/PO ให้ ${rows.length} รายการแล้ว`;
+  } else {
+    call = () => gasCall('receiveItems', id, { rows, date: v('[data-ddate]') || todayISO() });
+    done = `บันทึกรับของ ${rows.length} รายการแล้ว`;
+  }
+  btn.disabled = true;
+  try {
+    requests = await call();
+    updateReqBadge(); updateDlvBadge(); renderRequests(); refreshBudget();
+    toast(done);
+  } catch (err) { toast('ไม่สำเร็จ: ' + errMsg(err)); btn.disabled = false; }
+});
+
+// ---- แท็บ "ติดตามการส่งของ"
+
+function updateDlvBadge() {
+  const n = deliveryItems().filter(x => x.open && x.late).length;
+  const b = $('#dlvBadge');
+  b.hidden = !n;
+  b.textContent = n;
+}
+
+function renderDelivery() {
+  const all = deliveryItems();
+  const s = deliveryStats(all);
+  const d = n => n == null ? '–' : `${Math.round(n * 10) / 10} วัน`;
+  $('#dlvCards').innerHTML = `
+    <div class="card"><div class="k">ยังไม่ได้รับของ</div><div class="v">${fmt(s.open)}</div><div class="s">มูลค่า ${money(s.openAmt)}</div></div>
+    <div class="card ${s.lateOpen ? 'dead' : ''}"><div class="k">เลยกำหนดส่ง</div><div class="v ${s.lateOpen ? 'over' : ''}">${fmt(s.lateOpen)}</div><div class="s">รายการที่ต้องตาม</div></div>
+    <div class="card actual"><div class="k">รับของแล้ว</div><div class="v">${fmt(s.done)}</div><div class="s">จากที่ออก PR/PO ${fmt(s.n)} รายการ</div></div>
+    <div class="card store"><div class="k">ระยะส่งเฉลี่ย</div><div class="v">${d(s.avg)}</div><div class="s">กลาง ${d(s.median)} · ช้าสุด ${d(s.max)}</div></div>
+    <div class="card ${s.onTimePct != null && s.onTimePct < 80 ? 'dead' : 'actual'}"><div class="k">ส่งตรงเวลา</div><div class="v">${s.onTimePct == null ? '–' : s.onTimePct + '%'}</div><div class="s">${s.lateN ? `ช้า ${s.lateN} รายการ เฉลี่ย ${d(s.avgLate)}` : 'ยังไม่มีของที่มาช้า'}</div></div>`;
+
+  const byPc = groupDelivery(all.filter(x => x.lead != null), x => x.i.pc_code || '—', x => `${x.i.pc_code || '—'} ${x.i.pc_name || ''}`)
+    .filter(g => g.s.done).sort((a, b) => (b.s.avg || 0) - (a.s.avg || 0));
+  const byPo = groupDelivery(all, x => x.i.po_no || '—', x => x.i.po_no || 'ยังไม่มีเลข PO');
+  const worst = all.filter(x => x.open && x.late).sort((a, b) => b.lateBy - a.lateBy).slice(0, 5);
+  $('#dlvAnalysis').innerHTML = !s.n ? '<p class="hint">ยังไม่มีของที่ออก PR/PO — ใส่เลข PR/PO ได้ที่การ์ดคำขอที่อนุมัติแล้ว (แท็บตรวจคำขอสั่งซื้อ)</p>' : `
+    <div class="dlv-an">
+      <div class="an-box"><h4>ควรเผื่อเวลาสั่งของ</h4>
+        <p class="an-big">${d(s.p90)}</p>
+        <p class="hint">${s.done ? `9 ใน 10 ครั้ง ของมาภายในนี้ (เฉลี่ยจริง ${d(s.avg)}) — ตั้งกำหนดส่งเท่านี้จะพลาดน้อยที่สุด`
+          : 'ยังไม่มีของที่รับแล้ว ระบบใช้ค่าเริ่มต้น 14 วันไปก่อน'}</p></div>
+      <div class="an-box"><h4>PC ที่ของมาช้าที่สุด</h4>
+        ${byPc.length ? `<ol class="an-list">${byPc.slice(0, 5).map(g => `<li><span>${esc(g.label)}</span>
+          <span class="num">${d(g.s.avg)}${g.s.onTimePct != null ? ` · ตรงเวลา ${g.s.onTimePct}%` : ''}</span></li>`).join('')}</ol>`
+          : '<p class="hint">ยังไม่มีข้อมูลพอ</p>'}</div>
+      <div class="an-box"><h4>ต้องตามตอนนี้</h4>
+        ${worst.length ? `<ol class="an-list">${worst.map(x => `<li><span>${esc(x.i.name)}
+          <span class="pc">${esc(x.i.po_no || '—')} · ${esc(x.r.request_id)}</span></span>
+          <span class="num over">เลย ${x.lateBy} วัน</span></li>`).join('')}</ol>`
+          : '<p class="hint">ไม่มีของที่เลยกำหนด</p>'}</div>
+      <div class="an-box"><h4>แยกตามเลข PR/PO</h4>
+        <ol class="an-list">${byPo.slice(0, 6).map(g => `<li><span>${esc(g.label)}
+          <span class="pc">${fmt(g.items.length)} รายการ · ${money(g.items.reduce((a, x) => a + x.amount, 0))}</span></span>
+          <span class="num">${g.s.open ? `รอ ${g.s.open}` : 'ครบแล้ว'}</span></li>`).join('')}</ol></div>
+    </div>`;
+
+  const scope = $('#dlvScope').value;
+  const list = all.filter(x => scope === 'all' || (scope === 'open' && x.open) || (scope === 'late' && x.open && x.late) || (scope === 'done' && !x.open))
+    .sort((a, b) => (b.late ? 1 : 0) - (a.late ? 1 : 0) || String(a.i.eta_date).localeCompare(String(b.i.eta_date)));
+  $('#dlvListTitle').textContent = `รายการ (${fmt(list.length)})`;
+  $('#tblDelivery').innerHTML = !list.length ? '<tbody><tr><td class="empty">ไม่มีรายการตามเงื่อนไข</td></tr></tbody>' : `
+    <thead><tr><th>คำขอ</th><th>สินค้า</th><th>PC</th><th class="n">จำนวน</th><th class="n">รวม</th>
+      <th>PR</th><th>PO</th><th>ออก PO</th><th>กำหนดส่ง</th><th>รับจริง</th><th class="n">ระยะ</th><th>สถานะ</th></tr></thead>
+    <tbody>${list.map(x => `<tr class="${x.open && x.late ? 'is-late' : ''}">
+      <td class="sku"><button class="link-btn" data-open-req="${esc(x.r.request_id)}">${esc(x.r.request_id)}</button></td>
+      <td class="name">${esc(x.i.name)}</td><td class="pc">${esc(x.i.pc_code)}</td>
+      <td class="n">${fmt(x.i.qty)}</td><td class="n">${money(x.amount)}</td>
+      <td class="small">${esc(x.i.pr_no || '–')}</td><td class="small">${esc(x.i.po_no || '–')}</td>
+      <td class="small">${esc(thaiDay(x.i.po_at)) || '–'}</td><td class="small">${esc(thaiDay(x.i.eta_date)) || '–'}</td>
+      <td class="small">${esc(thaiDay(x.i.received_at)) || '–'}</td>
+      <td class="n">${x.lead != null ? x.lead + ' วัน' : '–'}</td>
+      <td>${x.open ? (x.late ? `<span class="tag st-rejected">เลย ${x.lateBy} วัน</span>` : '<span class="tag st-pending">รอของ</span>')
+        : x.vsEta > 0 ? `<span class="tag st-edit">ช้า ${x.vsEta} วัน</span>` : '<span class="tag st-approved">ตรงเวลา</span>'}</td>
+    </tr>`).join('')}</tbody>`;
+}
+
+$('#dlvScope').addEventListener('change', renderDelivery);
+$('#btnDlvExport').addEventListener('click', () => {
+  const all = deliveryItems();
+  if (!all.length) return toast('ยังไม่มีของที่ออก PR/PO');
+  const rows = all.map(x => ({ 'คำขอ': x.r.request_id, 'สินค้า': x.i.name, 'รหัส': x.i.sku, 'PC': x.i.pc_code,
+    'จำนวน': x.i.qty, 'หน่วย': x.i.unit, 'มูลค่า': x.amount, 'PR': x.i.pr_no, 'PO': x.i.po_no,
+    'วันออก PO': x.i.po_at, 'กำหนดส่ง': x.i.eta_date, 'รับจริง': x.i.received_at,
+    'ระยะการส่ง (วัน)': x.lead == null ? '' : x.lead, 'ช้ากว่ากำหนด (วัน)': x.vsEta == null ? '' : x.vsEta,
+    'สถานะ': x.open ? (x.late ? 'เลยกำหนด' : 'รอของ') : (x.vsEta > 0 ? 'ช้า' : 'ตรงเวลา') }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'การส่งของ');
+  XLSX.writeFile(wb, `ติดตามการส่งของ_${stamp()}.xlsx`);
+});
 
 // ------------------------------------------------------------ boot
 

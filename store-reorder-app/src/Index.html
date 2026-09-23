@@ -61,6 +61,7 @@
       <button class="tab nav-item" data-tab="order" data-role="all"><svg viewBox="0 0 24 24"><path d="M3 4h2l2 11h11l2-8H6"/><circle cx="9" cy="19" r="1.5"/><circle cx="17" cy="19" r="1.5"/></svg><span>สั่งซื้อตาม Budget</span><span id="cartBadge" class="badge">0</span></button>
       <button class="tab nav-item" data-tab="requests" data-role="user"><svg viewBox="0 0 24 24"><path d="M4 4h16v12H7l-3 3z"/><path d="M8 9h8M8 12h5"/></svg><span>คำขอของฉัน</span><span class="badge alert reqBadge" hidden>0</span></button>
       <button class="tab nav-item" data-tab="budget" data-role="all"><svg viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M7 15h4"/></svg><span>งบประมาณ</span></button>
+      <button class="tab nav-item" data-tab="delivery" data-role="all"><svg viewBox="0 0 24 24"><path d="M3 7h11v9H3z"/><path d="M14 10h4l3 3v3h-7z"/><circle cx="7" cy="18" r="1.6"/><circle cx="17" cy="18" r="1.6"/></svg><span>ติดตามการส่งของ</span><span id="dlvBadge" class="badge alert" hidden>0</span></button>
       <button class="tab nav-item" data-tab="compare" data-role="all"><svg viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h10"/><path d="M17 17l2 2 3-4"/></svg><span>รายการแนะนำจาก Store</span></button>
       <div class="nav-group" data-role="admin">ผู้ดูแลระบบ</div>
       <button class="tab nav-item" data-tab="data" data-role="admin"><svg viewBox="0 0 24 24"><path d="M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3z"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg><span>ข้อมูล Store</span></button>
@@ -315,6 +316,32 @@
         </div>
 
         <!-- ============ Store suggestions ============ -->
+        <!-- ============ ติดตามการส่งของ (PR/PO → ของถึง) ============ -->
+        <div id="tab-delivery" class="tabpane" hidden>
+          <div class="page-head">
+            <div><h2>ติดตามการส่งของ</h2>
+              <p class="hint">ของที่ออก PR/PO แล้ว — กำหนดส่ง เทียบกับวันที่ได้รับจริง · ใส่เลข PR/PO และวันรับของได้ที่การ์ดคำขอ</p></div>
+            <div class="top-actions">
+              <select id="dlvScope">
+                <option value="open">ยังไม่ได้รับของ</option>
+                <option value="late">เลยกำหนดส่ง</option>
+                <option value="done">รับของแล้ว</option>
+                <option value="all">ทั้งหมด</option>
+              </select>
+              <button id="btnDlvExport" class="btn sm ghost">ส่งออก .xlsx</button>
+            </div>
+          </div>
+          <div id="dlvCards" class="cards"></div>
+          <section class="panel">
+            <h3>วิเคราะห์ระยะเวลาส่งของ</h3>
+            <div id="dlvAnalysis"></div>
+          </section>
+          <section class="panel">
+            <h3 id="dlvListTitle">รายการ</h3>
+            <div class="table-wrap"><table id="tblDelivery" class="grid"></table></div>
+          </section>
+        </div>
+
         <div id="tab-compare" class="tabpane" hidden>
           <div class="page-head">
             <div>

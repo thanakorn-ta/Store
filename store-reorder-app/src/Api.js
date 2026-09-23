@@ -22,6 +22,7 @@ var MEMBER_FNS = [
   'cancelMyRequest', 'decideRequest', 'requestOverBudget', 'managerDecision', 'issuePo', 'markReceived',
   'getApprovalDraft', 'sendApprovalEmail', 'recordApproval', 'sendPurchasingEmail', 'getAppSettings', 'saveAppSettings',
   'recallRequest', 'returnForEdit', 'adminUpdateRequest', 'deleteRequest', 'getQuoteFile',
+  'savePrPo', 'receiveItems',
   'listMyRequests', 'listAllRequests', 'installReminderTrigger',
   // admin
   'listMembers', 'saveMember', 'resetMemberPassword', 'resetMemberPasswords', 'listMasterPc', 'saveMasterPc',
