@@ -435,12 +435,41 @@ function spark(r) {
   return `<span class="spark" title="${esc(title)}">${vals.map(v => `<b class="${v ? '' : 'z'}" style="height:${Math.max(1, Math.round(v / mx * 18))}px"></b>`).join('')}</span>`;
 }
 
+/** ต่อท้ายแถวที่ติ๊กแล้ว: ของชิ้นนี้ไปอยู่ใน Budget ไหน เดือนไหน เป็นเงินเท่าไร */
+function rowBudgetCell(c) {
+  if (!c) return '<td class="bud"><span class="dim">–</span></td>';
+  const line = budgetLine(c.budgetKey);
+  const m = Number(c.month);
+  if (!line || !m) return '<td class="bud"><span class="warn-txt">ยังไม่เลือกงบ</span></td>';
+  return `<td class="bud"><b>${money(lineAmt(c))}</b>
+    <div class="pc">${esc(line.location)} · ${esc(line.glCode)} · ${esc(THAI_MONTH_FULL[m] || '')}</div></td>`;
+}
+
+/** สรุปใต้ตาราง: แต่ละ Budget + เดือน เลือกไปกี่รายการ เป็นเงินเท่าไร และเหลือเท่าไร */
+function renderCompareBudget() {
+  const groups = draftGroups();
+  const box = $('#compareBudget');
+  if (!groups.length) { box.innerHTML = ''; return; }
+  const total = groups.reduce((a, g) => a + g.amount, 0);
+  box.innerHTML = `<div class="ps-head">ที่ติ๊กไว้ทั้งหมด ${fmt(state.draft.lines.length)} รายการ · รวม <b>${money(total)}</b>
+      <button class="btn sm" data-go="order">ไปหน้าสั่งซื้อ</button></div>
+    ${groups.map(g => {
+      if (!g.line || !g.month) return `<div class="ps-row warn"><span>${fmt(g.n)} รายการ ยังไม่ได้เลือก Budget/เดือน</span><span class="num">${money(g.amount)}</span></div>`;
+      return `<div class="ps-row ${g.over ? 'over' : ''}">
+        <span><b>${esc(g.line.location)} · ${esc(g.line.glCode)} ${esc(g.line.glName)}</b>
+          <span class="pc">${esc(g.line.company)} · เดือน${esc(THAI_MONTH_FULL[g.month])} · ${fmt(g.n)} รายการ</span></span>
+        <span class="num">${money(g.amount)}
+          <span class="pc">งบเหลือ ${money(g.b.available)} → ${g.over ? 'เกิน ' + money(-g.after) : 'คงเหลือ ' + money(g.after)}</span></span></div>`;
+    }).join('')}`;
+}
+
 function renderCompare() {
   const pl = budgetLine(state.pick.key);
   $('#compareHint').innerHTML = pl
     ? `ติ๊กรายการที่จะสั่ง → ใส่ใน <b>${esc(pl.label)}</b> · เดือน <b>${THAI_MONTH_FULL[Number(state.pick.month)] || ''}</b> <button class="link-btn" data-go="order">เปลี่ยน Budget</button>`
     : 'ติ๊กรายการที่จะสั่ง — ยังไม่ได้เลือก Budget: <button class="link-btn" data-go="order">เลือก Budget ก่อน</button> (หรือเลือกทีหลังในหน้าสั่งซื้อ)';
   const rows = filtered();
+  renderCompareBudget();
   const hasBase = rows.some(r => r.base);
   $('#countInfo').textContent = `แสดง ${fmt(rows.length)} จาก ${fmt(merged.rows.length)} รายการ`;
   if (!rows.length) {
@@ -455,14 +484,14 @@ function renderCompare() {
     <thead>
       <tr class="grp"><th colspan="4"></th><th colspan="3">การใช้ / คงเหลือ</th>
         <th colspan="2" class="col-manual">MIN / MAX</th>
-        <th colspan="3">ยอดแนะนำสั่ง</th>${hasBase ? '<th colspan="2">เทียบรอบก่อน</th>' : ''}<th colspan="2"></th></tr>
+        <th colspan="3">ยอดแนะนำสั่ง</th>${hasBase ? '<th colspan="2">เทียบรอบก่อน</th>' : ''}<th colspan="3"></th></tr>
       <tr class="sub">
         <th title="เลือกเพื่อสั่งซื้อ">สั่ง</th><th>รหัส</th><th>สินค้า</th><th>ประเภท</th>
         <th class="n">คงเหลือ</th><th class="n" title="Avg/เดือน ที่กรอกเอง → ใช้จริงเฉลี่ย">Avg เดิม → จริง</th><th>รายเดือน</th>
         <th class="n col-manual">เดิม</th><th class="n col-actual">จากใช้จริง</th>
         <th class="n col-store">Store</th><th class="n col-manual">MIN/MAX เดิม</th><th class="n col-actual">ใช้จริง</th>
         ${hasBase ? '<th class="n">คงเหลือก่อน</th><th class="n">Δ</th>' : ''}
-        <th class="n">จำนวนสั่ง</th><th>ข้อสังเกต</th>
+        <th class="n">จำนวนสั่ง</th><th>ข้อสังเกต</th><th class="n">ใส่ในงบ</th>
       </tr>
     </thead>
     <tbody>${rows.map(r => {
@@ -486,6 +515,7 @@ function renderCompare() {
           <td class="n delta ${d > 0 ? 'up' : d < 0 ? 'down' : ''}">${d == null ? '' : (d > 0 ? '+' : '') + fmt(d)}</td>` : ''}
         <td class="n"><input class="qty" type="number" min="0" step="1" data-qty value="${c ? c.qty : ''}" ${c ? '' : 'disabled'} aria-label="จำนวนสั่ง"></td>
         <td class="flags">${r.flags.map(f => `<div>${esc(f)}</div>`).join('')}</td>
+        ${rowBudgetCell(c)}
       </tr>`;
     }).join('')}</tbody>`;
 }
@@ -507,7 +537,7 @@ function renderCompareSimple(rows) {
     <thead><tr>
       <th title="เลือกเพื่อสั่งซื้อ">สั่ง</th><th>สินค้า</th><th>PC</th>
       <th class="n">คงเหลือ</th><th class="n">ใช้/เดือน</th><th>แนวโน้ม</th>
-      <th class="n">แนะนำสั่ง</th><th class="n">จำนวนสั่ง</th><th>ข้อควรรู้</th>
+      <th class="n">แนะนำสั่ง</th><th class="n">จำนวนสั่ง</th><th>ข้อควรรู้</th><th class="n">ใส่ในงบ</th>
     </tr></thead>
     <tbody>${rows.map(r => {
       const c = draftLineOf(r.sku);
@@ -523,6 +553,7 @@ function renderCompareSimple(rows) {
         <td class="n">${s.qty > 0 ? `<b>${fmt(s.qty)}</b><div class="src-tag">${esc(SOURCE_LABEL[s.from] || '')}</div>` : '<span class="zero">–</span>'}</td>
         <td class="n"><input class="qty" type="number" min="0" step="1" data-qty value="${c ? c.qty : ''}" ${c ? '' : 'disabled'} aria-label="จำนวนสั่ง"></td>
         <td class="flags">${esc(warn)}</td>
+        ${rowBudgetCell(c)}
       </tr>`;
     }).join('')}</tbody>`;
 }
@@ -545,6 +576,9 @@ $('#tblCompare').addEventListener('change', e => {
   } else if (e.target.matches('[data-qty]') && draftLineOf(sku)) {
     draftLineOf(sku).qty = Math.max(0, Math.round(Number(e.target.value) || 0));
   }
+  const bud = tr.querySelector('td.bud'); // ช่อง "ใส่ในงบ" ท้ายแถว + สรุปใต้ตาราง
+  if (bud) bud.outerHTML = rowBudgetCell(draftLineOf(sku));
+  renderCompareBudget();
   save(); renderCards();
 });
 

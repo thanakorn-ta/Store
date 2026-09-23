@@ -589,3 +589,19 @@ dialog.outbox::backdrop { background: rgba(0, 0, 0, .35); }
   cursor: pointer; font-size: 14px; line-height: 1; opacity: .45; padding: 4px; }
 .eye-btn:hover, .eye-btn.on { opacity: 1; }
 .gate-form .pw-wrap { display: flex; }
+
+/* ---- "ใส่ในงบ" ท้ายแถวรายการแนะนำ + สรุป Budget ใต้ตาราง */
+td.bud { white-space: nowrap; text-align: right; }
+td.bud .pc { font-weight: 400; }
+.warn-txt { color: var(--warn, #b25f00); font-size: 12px; }
+.pick-sum { margin-top: 12px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.pick-sum:empty { display: none; }
+.ps-head { display: flex; align-items: center; gap: 10px; justify-content: space-between;
+  background: var(--surface-2); padding: 10px 14px; font-size: 14px; }
+.ps-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  padding: 10px 14px; border-top: 1px solid var(--line); }
+.ps-row .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; font-weight: 700; }
+.ps-row .pc { font-weight: 400; }
+.ps-row.over { background: #fff1f0; }
+.ps-row.over .num { color: var(--danger, #c0392b); }
+.ps-row.warn { background: #fff8e6; }
