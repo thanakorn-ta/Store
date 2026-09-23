@@ -93,8 +93,18 @@ function rawCall(fn, args) {
     });
 }
 
+// true when the Apps Script deployment still runs an older Code.gs than this page
+let serverOutdated = false;
+
 const gasCall = (fn, ...args) => rawCall(fn, args).catch(e => {
-  if (/SESSION_EXPIRED/.test(e && e.message)) { setToken(''); applySession(null); throw new Error('หมดเวลาเข้าสู่ระบบ กรุณาเข้าสู่ระบบใหม่'); }
+  const msg = String((e && e.message) || e);
+  if (/SESSION_EXPIRED/.test(msg)) { setToken(''); applySession(null); throw new Error('หมดเวลาเข้าสู่ระบบ กรุณาเข้าสู่ระบบใหม่'); }
+  // Api.js answers "ไม่รู้จักคำสั่ง <fn>" when the deployed Code.gs predates this feature
+  if (/ไม่รู้จักคำสั่ง/.test(msg)) {
+    serverOutdated = true;
+    if (activeTab === 'home') renderHome(); else if (activeTab === 'requests') renderRequests();
+    throw new Error(`คำสั่ง "${fn}" ยังไม่มีในฝั่ง Apps Script — ต้องวางโค้ด Code.gs เวอร์ชันใหม่แล้ว Deploy เวอร์ชันใหม่ก่อน`);
+  }
   throw e;
 });
 
@@ -1149,7 +1159,7 @@ function applySession(info) {
   const prevId = me && me.id;
   me = info && info.id ? { ...info, email: String(info.email || info.id).toLowerCase() } : info;
   members = null; masterPc = []; requests = []; appSettings = null; // never show the previous user's data
-  editingReq = null; composing = null; reqFilterSet = false;
+  editingReq = null; composing = null; reqFilterSet = false; selectedReqs.clear(); visibleReqs = [];
   const active = isMember();
   const admin = isAdmin();
   // a different person on this browser starts with an empty request
@@ -1451,6 +1461,11 @@ let composing = null;      // { id, kind, draft } — email being prepared
 let masterPc = [];
 let reqFilterSet = false;  // first visit picks a sensible filter per role
 
+const OUTDATED_MSG = 'ระบบหลังบ้าน (Apps Script) ยังเป็นโค้ดเวอร์ชันเก่า — ปุ่มลบ / แก้ไข / ส่งกลับ / แนบใบเสนอราคา จะยังใช้ไม่ได้ ' +
+  'จนกว่าจะวาง build/apps-script/Code.gs เวอร์ชันใหม่ แล้ว Deploy → จัดการการทำให้ใช้งานได้ → แก้ไข → เวอร์ชันใหม่';
+const selectedReqs = new Set();  // admin: requests ticked for bulk delete
+let visibleReqs = [];            // ids currently listed (bulk actions only touch these)
+
 const mine = r => r.assigned.includes(me.email);
 const isRequester = r => String(r.requester_email || '').toLowerCase() === me.email;
 const isManagerOf = r => String(r.manager_email || '').toLowerCase() === me.email;
@@ -1495,6 +1510,7 @@ function renderHome() {
     (me && me.role ? ` · ${admin ? 'ผู้ดูแลระบบ (Admin)' : 'ผู้ใช้งาน (User)'}` : '');
 
   const alerts = [];
+  if (serverOutdated) alerts.push([OUTDATED_MSG, '', '']);
   if (admin && !hasData) alerts.push(['ยังไม่มีข้อมูล Store — นำเข้าไฟล์ 4 ไฟล์ก่อน (รายการแนะนำ / ยอดคงเหลือ)', 'data', 'ไปนำเข้าไฟล์']);
   if (isMember() && budgetOpts && !budgetOpts.error && !budgetOpts.lines.length) alerts.push(admin
     ? ['ยังไม่มีข้อมูล Budget — User ยังส่งคำขอไม่ได้', 'admin', 'นำเข้า Budget'] : ['ยังไม่มีข้อมูล Budget — รอ Admin นำเข้า', '', '']);
@@ -1600,11 +1616,14 @@ function renderRequests() {
   $('#reqDash').innerHTML = Object.values(ST).filter(s => by[s]).map(s =>
     `<button class="dash-chip ${STATUS_CLASS[s]} ${f === s ? 'sel' : ''}" data-filter="${esc(s)}"><b>${by[s].n}</b> ${esc(s)}<span>${money(by[s].v)}</span></button>`).join('');
   $('#reqInfo').textContent = `${list.length} คำขอ${admin ? '' : ' ของฉัน / ที่เกี่ยวกับฉัน'}`;
+  visibleReqs = list.map(r => r.request_id);
+  updateBulkBar();
+  const banner = serverOutdated ? `<div class="alert-row"><span>${esc(OUTDATED_MSG)}</span></div>` : '';
   if (!list.length) {
-    $('#reqList').innerHTML = `<div class="empty">${f === 'todo' ? 'ไม่มีงานที่รอคุณ 🎉' : 'ไม่มีคำขอ'}${!admin ? '<br><button class="btn sm" data-go="order">สั่งซื้อตาม Budget</button>' : ''}</div>`;
+    $('#reqList').innerHTML = banner + `<div class="empty">${f === 'todo' ? 'ไม่มีงานที่รอคุณ 🎉' : 'ไม่มีคำขอ'}${!admin ? '<br><button class="btn sm" data-go="order">สั่งซื้อตาม Budget</button>' : ''}</div>`;
     return;
   }
-  $('#reqList').innerHTML = list.map(renderReqCard).join('');
+  $('#reqList').innerHTML = banner + list.map(renderReqCard).join('');
   if (focusReq) {
     const el = document.querySelector(`.req-card[data-id="${CSS.escape(focusReq)}"]`);
     if (el) {
@@ -1615,6 +1634,42 @@ function renderRequests() {
     focusReq = null;
   }
 }
+
+/** Admin: tick several requests and delete them in one go (e.g. rounds nobody answered). */
+function updateBulkBar() {
+  const admin = isAdmin();
+  const n = [...selectedReqs].filter(id => visibleReqs.includes(id)).length;
+  $('#btnSelectAll').hidden = !admin || !visibleReqs.length;
+  $('#btnSelectAll').textContent = n && n === visibleReqs.length ? 'ไม่เลือกทั้งหมด' : `เลือกทั้งหมดที่แสดง (${visibleReqs.length})`;
+  $('#btnBulkDelete').hidden = !admin || !n;
+  $('#btnBulkDelete').textContent = `ลบที่เลือก (${n})`;
+}
+
+$('#btnSelectAll').addEventListener('click', () => {
+  const all = visibleReqs.every(id => selectedReqs.has(id));
+  visibleReqs.forEach(id => (all ? selectedReqs.delete(id) : selectedReqs.add(id)));
+  renderRequests();
+});
+
+$('#btnBulkDelete').addEventListener('click', async () => {
+  const ids = visibleReqs.filter(id => selectedReqs.has(id));
+  if (!ids.length) return;
+  const rows = ids.map(id => requests.find(r => r.request_id === id)).filter(Boolean);
+  const total = rows.reduce((a, r) => a + (Number(r.total) || 0), 0);
+  if (!confirm(`ลบ ${ids.length} คำขอ (รวม ${money(total)}) ทั้งหมด?\n` + rows.slice(0, 8).map(r => `• ${r.request_id} ${r.status} ${money(r.total)}`).join('\n') +
+    (rows.length > 8 ? `\n… และอีก ${rows.length - 8} รายการ` : '') + '\n\nรายการสินค้าจะถูกลบด้วย ย้อนกลับไม่ได้ในระบบ')) return;
+  const btn = $('#btnBulkDelete');
+  btn.disabled = true;
+  let done = 0, failed = [];
+  for (const id of ids) {
+    try { requests = await gasCall('deleteRequest', id); selectedReqs.delete(id); done++; }
+    catch (e) { failed.push(id + ': ' + errMsg(e)); }
+    btn.textContent = `กำลังลบ… ${done}/${ids.length}`;
+  }
+  btn.disabled = false;
+  updateReqBadge(); renderRequests(); refreshBudget();
+  toast(`ลบแล้ว ${done} คำขอ` + (failed.length ? ` · ลบไม่ได้ ${failed.length}: ${failed[0]}` : ''));
+});
 
 function fileChips(r) {
   if (!r.files || !r.files.length) return '';
@@ -1664,6 +1719,7 @@ function renderReqCard(r) {
 
   return `<div class="req-card ${needsMe(r) ? 'todo' : ''}" data-id="${esc(r.request_id)}">
     <div class="req-head">
+      ${admin ? `<input type="checkbox" class="req-sel" data-sel ${selectedReqs.has(r.request_id) ? 'checked' : ''} aria-label="เลือก ${esc(r.request_id)}">` : ''}
       <span class="id">${esc(r.request_id)}</span>
       <span class="tag ${STATUS_CLASS[r.status] || ''}">${esc(r.status)}</span>
       ${overAny ? '<span class="tag st-rejected">Over Budget</span>' : ''}
@@ -1918,6 +1974,12 @@ $('#reqList').addEventListener('input', e => {
   updateConfirmInfo(form);
 });
 $('#reqList').addEventListener('change', e => {
+  if (e.target.matches('[data-sel]')) {
+    const id = e.target.closest('[data-id]').dataset.id;
+    e.target.checked ? selectedReqs.add(id) : selectedReqs.delete(id);
+    updateBulkBar();
+    return;
+  }
   const aform = e.target.closest('[data-aform]');
   if (aform && !e.target.matches('[data-areason]')) { updateAdminEditBudget(aform); return; }
   const form = e.target.closest('[data-form]'); if (form) updateConfirmInfo(form);
