@@ -6,7 +6,7 @@
   <title>Store Reorder AI</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 </head>
@@ -21,33 +21,49 @@
         </div>
       </div>
       <div class="top-actions">
+        <span id="rolePill" class="role-pill" hidden></span>
         <span id="whoami" class="who" hidden></span>
       </div>
     </div>
   </header>
 
+  <!-- Demo / trial mode (web/demo.js) -->
+  <div id="demoBar" class="demo-bar" hidden>
+    <div class="demo-inner">
+      <span class="demo-tag">โหมดทดลอง</span>
+      <span class="demo-text">ข้อมูลตัวอย่างในเบราว์เซอร์นี้เท่านั้น · ไม่บันทึกลงระบบจริง · อีเมลไม่ถูกส่งจริง</span>
+      <span class="spacer"></span>
+      <button class="btn sm ghost" data-demo="admin">เข้าเป็น Admin</button>
+      <button class="btn sm ghost" data-demo="user">เข้าเป็น User</button>
+      <button class="btn sm ghost" data-demo="outbox">อีเมลที่ส่ง <span id="demoMailCount" class="badge">0</span></button>
+      <button class="btn sm ghost" data-demo="reset">เริ่มข้อมูลใหม่</button>
+      <button class="btn sm ghost" data-demo="exit">ออกจากโหมดทดลอง</button>
+    </div>
+  </div>
+
   <div class="shell">
-    <!-- Navigation: one item per job; buttons keep class "tab" so app.js switches views -->
+    <!-- Navigation: items carry data-role (all / admin / user); buttons keep class "tab" so app.js switches views -->
     <nav id="sidenav" class="sidenav" aria-label="เมนู">
-      <div class="nav-group">งานหลัก</div>
-      <button class="tab nav-item active" data-tab="home"><svg viewBox="0 0 24 24"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg><span>หน้าแรก</span></button>
-      <button class="tab nav-item" data-tab="compare"><svg viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h10"/><path d="M17 17l2 2 3-4"/></svg><span>1. เลือกรายการสั่ง</span></button>
-      <button class="tab nav-item" data-tab="cart"><svg viewBox="0 0 24 24"><path d="M3 4h2l2 11h11l2-8H6"/><circle cx="9" cy="19" r="1.5"/><circle cx="17" cy="19" r="1.5"/></svg><span>2. ตรวจ &amp; ส่งคำขอ</span><span id="cartBadge" class="badge">0</span></button>
-      <button class="tab nav-item" data-tab="requests" id="tabRequests" hidden><svg viewBox="0 0 24 24"><path d="M4 4h16v12H7l-3 3z"/><path d="M8 9h8M8 12h5"/></svg><span>3. ติดตามคำขอ</span><span id="reqBadge" class="badge alert" hidden>0</span></button>
-      <div class="nav-group">ข้อมูล</div>
-      <button class="tab nav-item" data-tab="budget" id="tabBudget" hidden><svg viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M7 15h4"/></svg><span>งบประมาณ</span></button>
-      <button class="tab nav-item" data-tab="data"><svg viewBox="0 0 24 24"><path d="M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3z"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg><span>ข้อมูล Store</span></button>
-      <button class="tab nav-item" data-tab="merged"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="1"/><path d="M3 10h18M9 4v16"/></svg><span>ตารางรวมทั้งหมด</span></button>
-      <button class="tab nav-item" data-tab="ai"><svg viewBox="0 0 24 24"><path d="M12 3l1.8 4.7L18.5 9.5 13.8 11.3 12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8z"/></svg><span>ผู้ช่วย AI</span></button>
-      <button class="tab nav-item" data-tab="admin" id="tabAdmin" hidden><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg><span>ตั้งค่าระบบ</span></button>
+      <div class="nav-group" id="navGroupMain">เมนู</div>
+      <button class="tab nav-item active" data-tab="home" data-role="all"><svg viewBox="0 0 24 24"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg><span data-admin="ภาพรวม" data-user="หน้าแรก">หน้าแรก</span></button>
+      <button class="tab nav-item" data-tab="requests" data-role="admin"><svg viewBox="0 0 24 24"><path d="M9 11l3 3 8-8"/><path d="M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9"/></svg><span>ตรวจคำขอสั่งซื้อ</span><span class="badge alert reqBadge" hidden>0</span></button>
+      <button class="tab nav-item" data-tab="order" data-role="all"><svg viewBox="0 0 24 24"><path d="M3 4h2l2 11h11l2-8H6"/><circle cx="9" cy="19" r="1.5"/><circle cx="17" cy="19" r="1.5"/></svg><span>สั่งซื้อตาม Budget</span><span id="cartBadge" class="badge">0</span></button>
+      <button class="tab nav-item" data-tab="requests" data-role="user"><svg viewBox="0 0 24 24"><path d="M4 4h16v12H7l-3 3z"/><path d="M8 9h8M8 12h5"/></svg><span>คำขอของฉัน</span><span class="badge alert reqBadge" hidden>0</span></button>
+      <button class="tab nav-item" data-tab="budget" data-role="all"><svg viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M7 15h4"/></svg><span>งบประมาณ</span></button>
+      <button class="tab nav-item" data-tab="compare" data-role="all"><svg viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h10"/><path d="M17 17l2 2 3-4"/></svg><span>รายการแนะนำจาก Store</span></button>
+      <div class="nav-group" data-role="admin">ผู้ดูแลระบบ</div>
+      <button class="tab nav-item" data-tab="data" data-role="admin"><svg viewBox="0 0 24 24"><path d="M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3z"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg><span>ข้อมูล Store</span></button>
+      <button class="tab nav-item" data-tab="merged" data-role="admin"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="1"/><path d="M3 10h18M9 4v16"/></svg><span>ตารางรวมทั้งหมด</span></button>
+      <button class="tab nav-item" data-tab="admin" data-role="admin"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg><span>สมาชิก &amp; ตั้งค่า</span></button>
+      <button class="tab nav-item" data-tab="ai" data-role="admin"><svg viewBox="0 0 24 24"><path d="M12 3l1.8 4.7L18.5 9.5 13.8 11.3 12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8z"/></svg><span>ผู้ช่วย AI</span></button>
     </nav>
 
     <main class="main">
-      <!-- Sign-in / sign-up (server mode) -->
+      <!-- Sign-in / sign-up -->
       <section id="gate" class="panel" hidden></section>
 
       <div id="work">
-        <!-- ============ Home ============ -->
+        <!-- ============ Home (different for Admin and User) ============ -->
         <div id="tab-home" class="tabpane">
           <div class="page-head">
             <div>
@@ -56,20 +72,123 @@
             </div>
           </div>
           <div id="homeAlerts"></div>
+          <div id="homeKpis" class="kpis"></div>
+          <div id="homeActions" class="action-cards"></div>
           <div class="home-grid">
             <section class="panel">
-              <h3>ขั้นตอนการใช้งาน</h3>
-              <ol id="homeSteps" class="steps"></ol>
+              <h3 id="homeTodoTitle">งานที่รอคุณ <span id="homeTodoCount" class="badge alert" hidden>0</span></h3>
+              <div id="homeTodo"></div>
             </section>
             <section class="panel">
-              <h3>งานที่รอคุณ <span id="homeTodoCount" class="badge alert" hidden>0</span></h3>
-              <div id="homeTodo"></div>
+              <h3 id="homeFlowTitle">ขั้นตอน</h3>
+              <ol id="homeSteps" class="steps"></ol>
             </section>
           </div>
           <section id="summary" class="panel" hidden>
             <h3>ภาพรวมสต๊อก</h3>
             <div id="cards" class="cards"></div>
           </section>
+        </div>
+
+        <!-- ============ Order by budget (budget first, then items) ============ -->
+        <div id="tab-order" class="tabpane" hidden>
+          <div class="page-head">
+            <div><h2>สั่งซื้อตาม Budget</h2><p class="hint">เลือก Budget และเดือน → ใส่รายการที่จะสั่งในงบนั้น → ส่งให้ Admin ตรวจ</p></div>
+            <div class="panel-actions">
+              <button id="btnExportCart" class="btn sm ghost">ส่งออก .xlsx</button>
+              <button id="btnClearCart" class="btn sm ghost">ล้างรายการทั้งหมด</button>
+            </div>
+          </div>
+          <div id="orderEditing" class="edit-banner" hidden></div>
+          <div id="orderEmpty"></div>
+          <div id="orderBody" class="order-layout">
+            <div class="order-main">
+              <section class="panel step-card">
+                <h3 class="step-h"><span class="num">1</span>เลือก Budget</h3>
+                <input id="obSearch" type="search" placeholder="ค้นหา Location / GL / บริษัท เช่น metro 530090">
+                <div id="obList" class="bl-list"></div>
+                <h3 class="step-h"><span class="num">2</span>เลือกเดือนที่จะใช้ของ</h3>
+                <div id="obMonths" class="month-pills"></div>
+                <div id="obPickInfo" class="pick-info"></div>
+              </section>
+
+              <section class="panel step-card" id="itemsCard">
+                <h3 class="step-h"><span class="num">3</span>ใส่รายการสั่งซื้อในงบนี้</h3>
+                <p id="itemsFor" class="hint"></p>
+                <div class="add-box">
+                  <input id="oiSearch" type="search" placeholder="ค้นหาสินค้าใน Store — รหัส หรือ ชื่อ" autocomplete="off">
+                  <div id="oiResults" class="suggest-list" hidden></div>
+                </div>
+                <div id="oiSuggest" class="chips"></div>
+                <details id="oiNew" class="new-item">
+                  <summary>+ เพิ่มรายการที่ไม่มีใน Store</summary>
+                  <form id="oiNewForm" class="inline-form">
+                    <input name="name" placeholder="ชื่อสินค้า / อุปกรณ์" required style="flex:2 1 220px">
+                    <input name="qty" type="number" min="1" step="1" placeholder="จำนวน" required style="width:90px">
+                    <input name="unit" placeholder="หน่วย" style="width:90px">
+                    <input name="cost" type="number" min="0" step="0.01" placeholder="ราคา/หน่วย" required style="width:120px">
+                    <button class="btn sm">เพิ่ม</button>
+                  </form>
+                </details>
+                <div id="oiLines"></div>
+              </section>
+            </div>
+
+            <aside class="order-side">
+              <section class="panel side-card">
+                <h3>สรุปคำขอ</h3>
+                <div id="oSummary"></div>
+                <div class="field">
+                  <label for="oFiles">แนบใบเสนอราคา (ถ้ามี)</label>
+                  <input id="oFiles" type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.xlsx,.xls,.docx,.doc,.csv">
+                  <ul id="oFileList" class="file-list"></ul>
+                  <p class="hint">PDF / รูป / Excel / Word · ไฟล์ละไม่เกิน 5 MB · รวมไม่เกิน 10 MB</p>
+                </div>
+                <div class="field">
+                  <label for="reqNote">หมายเหตุถึง Admin</label>
+                  <textarea id="reqNote" rows="2" placeholder="เช่น ต้องการด่วนภายใน…, เบื้องต้นได้ปรึกษา…แล้ว"></textarea>
+                </div>
+                <button id="btnSubmitReq" class="btn lg block">ส่งให้ Admin ตรวจ</button>
+                <button id="btnCancelEdit" class="btn ghost block" hidden>ยกเลิกการแก้ไข</button>
+                <p id="submitHint" class="hint"></p>
+              </section>
+
+              <section id="roundBox" class="panel side-card" hidden>
+                <h3>Admin: ส่งให้แต่ละ PC ยืนยันเอง</h3>
+                <p class="hint">แยกรายการตาม PC แล้วอีเมลถึงผู้รับผิดชอบใน Master PC · ไม่ตอบใน 3 วันระบบเตือนซ้ำ</p>
+                <input id="roundNote" placeholder="หมายเหตุถึงทุก PC (ไม่บังคับ)">
+                <button id="btnRound" class="btn ghost block">ส่งให้ PC ยืนยันทางอีเมล</button>
+              </section>
+            </aside>
+          </div>
+        </div>
+
+        <!-- ============ Requests (Admin: review · User: my requests) ============ -->
+        <div id="tab-requests" class="tabpane" hidden>
+          <div class="page-head">
+            <div><h2 id="reqTitle">คำขอ</h2><p id="reqInfo" class="hint"></p></div>
+            <div class="panel-actions">
+              <input id="reqSearch" type="search" placeholder="ค้นหาเลขคำขอ / ผู้ขอ / สินค้า">
+              <select id="reqFilter">
+                <option value="todo">รอฉันดำเนินการ</option>
+                <option value="">ทั้งหมด</option>
+                <option>รอ Admin ตรวจ</option>
+                <option>รอผู้ขอแก้ไข</option>
+                <option>รอผู้บริหารอนุมัติ</option>
+                <option>อนุมัติ</option>
+                <option>ออก PR/PO แล้ว</option>
+                <option>รับของแล้ว</option>
+                <option>ไม่อนุมัติ</option>
+                <option>รอ PC ยืนยัน</option>
+                <option>รอหัวหน้าอนุมัติเกินงบ</option>
+                <option>PC ปฏิเสธ</option>
+                <option>ยกเลิก</option>
+              </select>
+              <button id="btnReloadReq" class="btn sm ghost">โหลดใหม่</button>
+            </div>
+          </div>
+          <div id="reqDash" class="dash"></div>
+          <div id="reqList"></div>
         </div>
 
         <!-- ============ Budget ============ -->
@@ -110,13 +229,13 @@
                 </select>
                 <span id="bInfo" class="hint"></span>
               </div>
-              <p class="hint">คลิกแถวเพื่อดูรายละเอียดแต่ละเดือน · คงเหลือ = งบ − ใช้จริง (Actual จากไฟล์ Budget) − คำขอในระบบที่อนุมัติ/รออนุมัติ</p>
+              <p class="hint">คลิกแถวเพื่อดูรายละเอียดแต่ละเดือน · กด "สั่งซื้อในงบนี้" เพื่อไปใส่รายการ · คงเหลือ = งบ − ใช้จริง − คำขอที่อนุมัติ/รออนุมัติ</p>
               <div class="table-wrap"><table id="tblBudget" class="grid"></table></div>
             </section>
           </div>
         </div>
 
-        <!-- ============ Store data ============ -->
+        <!-- ============ Store data (Admin) ============ -->
         <div id="tab-data" class="tabpane" hidden>
           <div class="page-head">
             <div>
@@ -176,12 +295,12 @@
           </label>
         </div>
 
-        <!-- ============ Step 1: pick items ============ -->
+        <!-- ============ Store suggestions ============ -->
         <div id="tab-compare" class="tabpane" hidden>
           <div class="page-head">
             <div>
-              <h2>1. เลือกรายการที่จะสั่ง</h2>
-              <p class="hint">ติ๊กรายการ แก้จำนวนได้ แล้วกด <b>ถัดไป</b> ที่แถบด้านล่าง</p>
+              <h2>รายการแนะนำจาก Store</h2>
+              <p id="compareHint" class="hint">ติ๊กรายการที่จะสั่ง — จะถูกใส่ใน Budget ที่เลือกไว้ในหน้า "สั่งซื้อตาม Budget"</p>
             </div>
             <label class="switch"><input type="checkbox" id="detailToggle"><span>แสดงแบบละเอียด (เทียบ 3 วิธี)</span></label>
           </div>
@@ -201,83 +320,25 @@
           <div class="table-wrap"><table id="tblMerged" class="grid"></table></div>
         </div>
 
-        <!-- ============ Step 2: review & send ============ -->
-        <div id="tab-cart" class="tabpane" hidden>
-          <div class="page-head">
-            <div><h2>2. ตรวจรายการ &amp; ส่งคำขอ</h2><p id="cartTotal" class="hint"></p></div>
-            <div class="panel-actions">
-              <button id="btnExportCart" class="btn sm ghost">ส่งออก .xlsx</button>
-              <button id="btnCopyCart" class="btn sm ghost">คัดลอก</button>
-              <button id="btnClearCart" class="btn sm ghost">ล้างรายการ</button>
-            </div>
-          </div>
-          <ol id="cartStepper" class="stepper">
-            <li>ตรวจจำนวน</li><li>เลือก Budget + เดือน</li><li>ส่งให้ Admin ตรวจ</li>
-          </ol>
-          <div id="cartBody"></div>
-
-          <div id="submitBox" class="panel submit-box">
-            <h3 id="submitTitle">ส่งคำขอสั่งซื้อให้ Admin</h3>
-            <p id="submitHint" class="hint"></p>
-            <div id="submitForm" class="submit-grid">
-              <div class="field">
-                <label for="budgetSearch">Budget ตั้งต้น (ใช้กับรายการที่ยังไม่ได้เลือก Budget)</label>
-                <input id="budgetSearch" type="search" placeholder="ค้นหา เช่น 530090 cookies">
-                <select id="budgetSel" size="7"></select>
-                <label for="monthSel">ใช้ของเดือน</label>
-                <select id="monthSel"></select>
-                <button id="btnApplyBudget" class="btn sm ghost" type="button">ใช้ Budget + เดือนนี้กับทุกรายการ</button>
-                <p class="hint">เปลี่ยน Budget / เดือน ของแต่ละรายการได้ในตารางด้านบน</p>
-              </div>
-              <div class="field">
-                <label>สรุปงบตาม Budget ที่เลือก</label>
-                <div id="budgetInfo" class="budget-info"></div>
-                <label for="reqNote">หมายเหตุถึง Admin</label>
-                <textarea id="reqNote" rows="2" placeholder="เช่น ต้องการด่วนภายใน…, เบื้องต้นได้ปรึกษา…แล้ว"></textarea>
-                <button id="btnSubmitReq" class="btn lg">ส่งคำขอให้ Admin ตรวจ</button>
-              </div>
-            </div>
-          </div>
-
-          <div id="roundBox" class="panel submit-box" hidden>
-            <h3>หรือ (Admin): ส่งให้แต่ละ PC ยืนยันเอง</h3>
-            <p class="hint">แยกรายการตาม PC แล้วอีเมลถึงผู้รับผิดชอบใน Master PC — PC แก้จำนวน เลือก Budget + เดือน แล้วส่งกลับมาให้อนุมัติ · ไม่ตอบใน 3 วันระบบเตือนซ้ำ</p>
-            <div class="inline-form">
-              <input id="roundNote" placeholder="หมายเหตุถึงทุก PC (ไม่บังคับ) เช่น ขอคำตอบภายในวันศุกร์" style="flex:1 1 320px">
-              <button id="btnRound" class="btn">ส่งให้ PC ยืนยันทางอีเมล</button>
-            </div>
-          </div>
-        </div>
-
-        <!-- ============ Step 3: track requests ============ -->
-        <div id="tab-requests" class="tabpane" hidden>
-          <div class="page-head">
-            <div><h2>3. ติดตามคำขอ</h2><p id="reqInfo" class="hint"></p></div>
-            <div class="panel-actions">
-              <select id="reqFilter">
-                <option value="todo">รอฉันดำเนินการ</option>
-                <option value="">ทั้งหมด</option>
-                <option>รอ PC ยืนยัน</option>
-                <option>รอ Admin ตรวจ</option>
-                <option>รอผู้บริหารอนุมัติ</option>
-                <option>รอหัวหน้าอนุมัติเกินงบ</option>
-                <option>อนุมัติ</option>
-                <option>ออก PR/PO แล้ว</option>
-                <option>รับของแล้ว</option>
-                <option>ไม่อนุมัติ</option>
-                <option>PC ปฏิเสธ</option>
-                <option>ยกเลิก</option>
-              </select>
-              <button id="btnReloadReq" class="btn sm ghost">โหลดใหม่</button>
-            </div>
-          </div>
-          <div id="reqDash" class="dash"></div>
-          <div id="reqList"></div>
-        </div>
-
-        <!-- ============ Admin ============ -->
+        <!-- ============ Admin: members & settings ============ -->
         <div id="tab-admin" class="tabpane" hidden>
-          <div class="page-head"><div><h2>ตั้งค่าระบบ</h2><p class="hint">สมาชิก · Budget · ผู้รับผิดชอบแต่ละ PC · การเตือนอัตโนมัติ</p></div></div>
+          <div class="page-head"><div><h2>สมาชิก &amp; ตั้งค่า</h2><p class="hint">สมาชิก · Budget · อีเมลส่งรายการสั่งซื้อ · ผู้รับผิดชอบแต่ละ PC</p></div></div>
+          <section class="panel">
+            <h3>ตั้งค่าอีเมลส่งรายการสั่งซื้อ + Budget</h3>
+            <p class="hint">Admin ตรวจคำขอแล้วกด "ส่งเมล" — ส่งถึงอีเมลด้านล่างก่อน (แนบไฟล์ Excel รายการสั่งซื้อ + Budget และใบเสนอราคาของผู้ขอ) · แก้ได้อีกครั้งก่อนส่งทุกครั้ง</p>
+            <form id="settingsForm" class="compose-grid">
+              <label>ส่งถึง (ถึง)<input name="approval_to" placeholder="thanakorn@planbmedia.co.th"></label>
+              <label>สำเนา (CC)<input name="approval_cc" placeholder="ผู้เกี่ยวข้อง"></label>
+              <label>ชื่อทีม (ต่อท้ายเรื่อง)<input name="team_name" placeholder="ทีม Static"></label>
+              <label>เรียน<input name="approval_greeting" placeholder="เช่น ผู้บริหาร / คุณวสุ"></label>
+              <label>ฝ่ายจัดซื้อ — ถึง<input name="purchasing_to" placeholder="อีเมลฝ่ายจัดซื้อ"></label>
+              <label>ฝ่ายจัดซื้อ — สำเนา (CC)<input name="purchasing_cc"></label>
+              <label class="wide">ข้อความเพิ่มเติม (ไม่บังคับ)<textarea name="approval_intro" rows="2"></textarea></label>
+              <label class="wide">ลิงก์แนบ (ไม่บังคับ)<input name="approval_link" placeholder="https://…"></label>
+              <label class="wide">ลายเซ็นท้ายอีเมล<textarea name="signature" rows="3" placeholder="Thank you,&#10;ชื่อ ตำแหน่ง&#10;Tel."></textarea></label>
+              <div class="wide"><button class="btn sm" type="submit">บันทึกการตั้งค่า</button> <span id="settingsStatus" class="hint"></span></div>
+            </form>
+          </section>
           <div class="admin-grid">
             <section class="panel">
               <h3>สมาชิก</h3>
@@ -304,22 +365,6 @@
               <button id="btnTrigger" class="btn sm ghost">เปิดการเตือนอัตโนมัติ</button>
             </section>
           </div>
-          <section class="panel">
-            <h3>ตั้งค่าอีเมลขออนุมัติ</h3>
-            <p class="hint">ค่าตั้งต้นตอน Admin กด "ส่งอีเมลขออนุมัติผู้บริหาร" และ "ส่งแจ้งฝ่ายจัดซื้อ" — แก้ได้อีกครั้งก่อนส่งทุกครั้ง</p>
-            <form id="settingsForm" class="compose-grid">
-              <label>ชื่อทีม (ต่อท้ายเรื่อง)<input name="team_name" placeholder="ทีม Static"></label>
-              <label>เรียน (ผู้อนุมัติ)<input name="approval_greeting" placeholder="เช่น คุณวสุ"></label>
-              <label>ผู้อนุมัติ — ถึง<input name="approval_to" placeholder="อีเมล คั่นด้วย ,"></label>
-              <label>ผู้อนุมัติ — สำเนา (CC)<input name="approval_cc" placeholder="ผู้เกี่ยวข้อง"></label>
-              <label>ฝ่ายจัดซื้อ — ถึง<input name="purchasing_to" placeholder="อีเมลฝ่ายจัดซื้อ"></label>
-              <label>ฝ่ายจัดซื้อ — สำเนา (CC)<input name="purchasing_cc"></label>
-              <label class="wide">ข้อความเพิ่มเติม (ไม่บังคับ)<textarea name="approval_intro" rows="2"></textarea></label>
-              <label class="wide">ลิงก์แนบ (ไม่บังคับ)<input name="approval_link" placeholder="https://…"></label>
-              <label class="wide">ลายเซ็นท้ายอีเมล<textarea name="signature" rows="3" placeholder="Thank you,&#10;ชื่อ ตำแหน่ง&#10;Tel."></textarea></label>
-              <div class="wide"><button class="btn sm" type="submit">บันทึกการตั้งค่า</button> <span id="settingsStatus" class="hint"></span></div>
-            </form>
-          </section>
           <section class="panel">
             <h3>Master PC — ผู้รับผิดชอบยืนยันรายการ และหัวหน้าอนุมัติเกินงบ</h3>
             <p class="hint">แถวที่ไฮไลต์ = ยังไม่มีอีเมลผู้รับผิดชอบ (สร้างคำขอได้ แต่ยังส่งอีเมลไม่ได้)</p>
@@ -350,15 +395,28 @@
     </main>
   </div>
 
-  <!-- Sticky basket: always shows what is selected and the next step -->
+  <!-- Sticky basket: what is in the draft request and the next step -->
   <div id="cartBar" class="cart-bar" hidden>
     <div class="cart-bar-inner">
       <span id="cartBarText"></span>
-      <button id="cartBarBtn" class="btn">ถัดไป: ตรวจ &amp; ส่งคำขอ →</button>
+      <button id="cartBarBtn" class="btn">ไปหน้าสั่งซื้อตาม Budget →</button>
     </div>
   </div>
 
+  <!-- Demo mode: emails the demo "sent" -->
+  <dialog id="demoOutbox" class="outbox">
+    <div class="outbox-head"><h3>อีเมลที่ระบบส่ง (โหมดทดลอง — ไม่ได้ส่งจริง)</h3><button class="icon-btn" data-demo="close" aria-label="ปิด">×</button></div>
+    <div class="outbox-body"><ul id="demoMailList" class="mail-list"></ul><div id="demoMailView" class="mail-view"></div></div>
+  </dialog>
+
+  <!-- Quotation viewer -->
+  <dialog id="fileViewer" class="outbox viewer">
+    <div class="outbox-head"><h3 id="fileViewerTitle">ใบเสนอราคา</h3><button class="icon-btn" data-closeviewer aria-label="ปิด">×</button></div>
+    <div id="fileViewerBody" class="viewer-body"></div>
+  </dialog>
+
   <div id="toast" class="toast" hidden></div>
+  <script src="demo.js"></script>
   <script src="parsers.js"></script>
   <script src="engine.js"></script>
   <script src="app.js"></script>

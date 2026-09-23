@@ -10,7 +10,7 @@
 var SETTINGS_HEADER = ['key', 'value'];
 var SETTINGS_DEFAULTS = {
   team_name: 'ทีม Static',
-  approval_to: '',            // head(s) who approve, comma separated
+  approval_to: 'thanakorn@planbmedia.co.th', // first stop: order list + budget go here, then on to the head
   approval_cc: '',
   approval_greeting: 'ผู้บริหาร',
   approval_intro: '',          // extra line under the budget summary, e.g. "****เบื้องต้นได้ปรึกษา … เรียบร้อยค่ะ"
@@ -30,7 +30,9 @@ function readSettings_(ss) {
   var sheet = ss.getSheetByName(CONFIG.SHEETS.SETTINGS);
   if (!sheet) return out;
   readSheetAsObjects_(ss, CONFIG.SHEETS.SETTINGS).forEach(function (r) {
-    if (r.key && Object.prototype.hasOwnProperty.call(SETTINGS_DEFAULTS, r.key)) out[r.key] = String(r.value == null ? '' : r.value);
+    if (!r.key || !Object.prototype.hasOwnProperty.call(SETTINGS_DEFAULTS, r.key)) return;
+    var v = String(r.value == null ? '' : r.value);
+    if (v !== '' || r.key !== 'approval_to') out[r.key] = v; // blank recipient falls back to the default
   });
   return out;
 }
@@ -80,7 +82,76 @@ function getApprovalDraft(id, kind, overrides) {
     if (overrides && overrides[k] != null) o[k] = String(overrides[k]);
   });
   o.html = buildApprovalHtml_(ss, req, o, s, kind);
+  o.files = quoteFilesByRequest_(ss)[id] || [];   // quotations the requester attached
+  o.excelName = orderFileName_(req) + '.xlsx';    // order list + budget, generated at send time
   return o;
+}
+
+/**
+ * Attachments for the approval / purchasing email: the generated Excel file
+ * (order list + budget per line/month) and the quotations.
+ * opts.attachExcel (default true), opts.attachFileIds (default: all of this request's files).
+ */
+function approvalAttachments_(ss, req, opts) {
+  var out = [];
+  if (opts.attachExcel !== false) out.push(orderSheetBlob_(ss, req));
+  var ids = opts.attachFileIds == null ? null : [].concat(opts.attachFileIds);
+  return out.concat(quoteBlobs_(ss, req.request_id, ids));
+}
+
+function orderFileName_(req) {
+  return 'รายการสั่งซื้อและ Budget ' + req.request_id;
+}
+
+/**
+ * Excel workbook: sheet 1 = the 14 columns of the email table, sheet 2 = budget per line/month.
+ * Built as a temporary Google Sheet exported to .xlsx; falls back to a UTF-8 CSV if that fails.
+ */
+function orderSheetBlob_(ss, req) {
+  var d = approvalData_(ss, req);
+  var name = orderFileName_(req);
+  var head = ['Company/นามบริษัท', 'Media Type', 'Sub Media Type', 'Expense Group/Part Code Detail.', 'Remark ตาม Budget',
+    'รหัสสินค้า', 'รายการสั่งซื้ออุปกรณ์', 'จำนวนที่สั่งซื้อ', 'หน่วย', 'จำนวนคงเหลือในStore', 'ขอบเขตการใช้งาน',
+    'ค่าใช้จ่ายตาม Budget', 'ค่าใช้จ่ายโดยประมาณ', 'เดือนสั่งอุปกรณ์', 'สถานะการขออนุมัติ', 'Over Budget / เหตุผล'];
+  var rows = d.items.map(function (i) {
+    return [i.line.company, i.line.mediaType || i.line.mediaGroup || '', i.line.location || i.line.mediaGroup || '',
+      i.line.expenseGroup || i.line.glName || '', i.remark, i.sku, i.name, i.qty, i.unit, i.balance, i.note,
+      i.plan, i.amount, THAI_MONTH_FULL[i.month] + ' ' + d.be, normStatus_(req.status), i.over ? 'Over Budget: ' + i.overReason : ''];
+  });
+  rows.push(['รวม', '', '', '', '', '', '', '', '', '', '', d.bgTotal, d.total, '', '', '']);
+  var seen = {}, bRows = [];
+  d.items.forEach(function (i) {
+    var k = i.key + '|' + i.month;
+    if (seen[k]) { seen[k][4] += i.amount; return; }
+    seen[k] = [i.line.label, i.line.glCode || '', THAI_MONTH_FULL[i.month] + ' ' + d.be, i.plan, i.amount, i.over ? 'Over Budget' : '', i.overReason];
+    bRows.push(seen[k]);
+  });
+  var tmp = null;
+  var bHead = ['Budget', 'GL Code', 'เดือน', 'งบตาม BG', 'คำขอนี้', 'สถานะงบ', 'เหตุผล Over Budget'];
+  var info = [['เลขที่คำขอ', req.request_id], ['ผู้ขอ', req.requester_name || req.requester_email], ['วันที่', req.created_at],
+    ['หมายเหตุ', req.note || ''], ['งบตาม BG รวม', d.bgTotal], ['ค่าใช้จ่ายโดยประมาณ (ไม่รวม VAT)', d.total]];
+  try {
+    tmp = SpreadsheetApp.create(name);
+    var s1 = tmp.getSheets()[0].setName('รายการสั่งซื้อ');
+    s1.getRange(1, 1, 1, head.length).setValues([head]).setFontWeight('bold');
+    s1.getRange(2, 1, rows.length, head.length).setValues(rows);
+    var s2 = tmp.insertSheet('Budget');
+    s2.getRange(1, 1, info.length, 2).setValues(info);
+    s2.getRange(info.length + 2, 1, 1, bHead.length).setValues([bHead]).setFontWeight('bold');
+    if (bRows.length) s2.getRange(info.length + 3, 1, bRows.length, bHead.length).setValues(bRows);
+    SpreadsheetApp.flush();
+    var resp = UrlFetchApp.fetch('https://docs.google.com/spreadsheets/d/' + tmp.getId() + '/export?format=xlsx',
+      { headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, muteHttpExceptions: true });
+    DriveApp.getFileById(tmp.getId()).setTrashed(true);
+    if (resp.getResponseCode() !== 200) throw new Error('export ' + resp.getResponseCode());
+    return resp.getBlob().setName(name + '.xlsx');
+  } catch (e) {
+    var csvCell = function (v) { v = v == null ? '' : String(v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+    var csv = [head].concat(rows).concat([[]]).concat(info).concat([[]]).concat([bHead]).concat(bRows)
+      .map(function (r) { return r.map(csvCell).join(','); }).join('\r\n');
+    if (tmp) { try { DriveApp.getFileById(tmp.getId()).setTrashed(true); } catch (e2) { /* already trashed */ } }
+    return Utilities.newBlob(String.fromCharCode(0xFEFF) + csv, 'text/csv', name + '.csv'); // BOM so Excel reads Thai as UTF-8
+  }
 }
 
 /** Admin sends the approval email to the head. รอ Admin ตรวจ → รอผู้บริหารอนุมัติ (resend allowed while waiting). */
@@ -92,19 +163,20 @@ function sendApprovalEmail(id, opts) {
   if ([STATUS.PENDING, STATUS.APPROVAL_WAIT].indexOf(st) === -1) throw new Error('ส่งขออนุมัติได้เฉพาะคำขอที่รอ Admin ตรวจ (' + st + ')');
   opts = opts || {};
   var to = splitEmails_(opts.to), cc = splitEmails_(opts.cc);
-  if (!to.length) throw new Error('กรุณาใส่อีเมลผู้อนุมัติ (ถึง)');
+  if (!to.length) throw new Error('กรุณาใส่อีเมลผู้รับ (ถึง)');
   var s = readSettings_(ss);
   var subject = String(opts.subject || approvalSubject_('approval', s)).slice(0, 250) + ' [' + id + ']';
   var html = buildApprovalHtml_(ss, req, opts, s, 'approval') +
     appLink_(id, 'เปิดระบบเพื่ออนุมัติ / ไม่อนุมัติ (สำหรับผู้อนุมัติที่เป็นสมาชิก)');
-  MailApp.sendEmail({ to: to.join(','), cc: cc.join(','), replyTo: me.email, subject: subject, htmlBody: html,
+  var attachments = approvalAttachments_(ss, req, opts);
+  MailApp.sendEmail({ to: to.join(','), cc: cc.join(','), replyTo: me.email, subject: subject, htmlBody: html, attachments: attachments,
     name: 'Store Reorder · ' + (me.name || me.email) });
   setRequestFields_(ss, id, { status: STATUS.APPROVAL_WAIT, approval_to: to.join(', '), approval_cc: cc.join(', '),
     approval_subject: subject, approval_sent_at: new Date(), decided_by: me.email,
     admin_note: String(opts.adminNote || req.admin_note || '').slice(0, 500) });
   mailPeople_(requestPeople_(req), '[Store Reorder] ' + id + ' ส่งขออนุมัติผู้บริหารแล้ว',
     'คำขอ ' + esc_(id) + ' (' + fmtMoney_(req.total) + ' บาท) Admin ตรวจแล้ว และส่งอีเมลขออนุมัติถึง ' + esc_(to.join(', ')) + appLink_(id));
-  logActivity_('sendApprovalEmail', 'ok', id + ' -> ' + to.join(',') + ' by ' + me.email);
+  logActivity_('sendApprovalEmail', 'ok', id + ' -> ' + to.join(',') + ' by ' + me.email + ' attachments ' + attachments.length);
   return loadRequestsFor_(me);
 }
 
@@ -142,7 +214,8 @@ function sendPurchasingEmail(id, opts) {
   var s = readSettings_(ss);
   var subject = String(opts.subject || approvalSubject_('purchasing', s)).slice(0, 250) + ' [' + id + ']';
   MailApp.sendEmail({ to: to.join(','), cc: cc.join(','), replyTo: me.email, subject: subject,
-    htmlBody: buildApprovalHtml_(ss, req, opts, s, 'purchasing'), name: 'Store Reorder · ' + (me.name || me.email) });
+    htmlBody: buildApprovalHtml_(ss, req, opts, s, 'purchasing'), attachments: approvalAttachments_(ss, req, opts),
+    name: 'Store Reorder · ' + (me.name || me.email) });
   setRequestFields_(ss, id, { purchasing_sent_at: new Date() });
   logActivity_('sendPurchasingEmail', 'ok', id + ' -> ' + to.join(',') + ' by ' + me.email);
   return loadRequestsFor_(me);
@@ -153,15 +226,8 @@ function approvalSubject_(kind, s) {
   return (kind === 'purchasing' ? 'ได้รับการอนุมัติสั่งซื้ออุปกรณ์' : 'ขออนุมัติสั่งซื้ออุปกรณ์') + team;
 }
 
-/**
- * Body in the team's format:
- *   เรียน / สำเนา / เรื่อง, Budget months, BG total vs estimate (ไม่รวม VAT)
- *   per "สื่อ {location} หมวด{expense group}" → per month "งบประมาณ ตาม BG {plan} เดือน {month} {พ.ศ.}"
- *     → "- item qty unit amount บาท", STORE balance, หมายเหตุ
- *   then the 14-column table and "จึงเรียนมาเพื่อโปรดพิจารณา".
- */
-function buildApprovalHtml_(ss, req, o, s, kind) {
-  o = o || {};
+/** Items of a request with their budget line/month details, plus the BG and estimate totals. */
+function approvalData_(ss, req) {
   var opts = budgetOptions_(ss);
   var lineBy = {};
   opts.lines.forEach(function (l) { lineBy[l.key] = l; });
@@ -185,6 +251,20 @@ function buildApprovalHtml_(ss, req, o, s, kind) {
   items.forEach(function (i) { var k = i.key + '|' + i.month; if (!seen[k]) { seen[k] = 1; bgTotal += i.plan; } });
   var total = items.reduce(function (a, i) { return a + i.amount; }, 0);
   var months = uniq_(items.map(function (i) { return String(i.month); })).map(Number).sort(function (a, b) { return a - b; });
+  return { items: items, bgTotal: bgTotal, total: total, months: months, be: be };
+}
+
+/**
+ * Body in the team's format:
+ *   เรียน / สำเนา / เรื่อง, Budget months, BG total vs estimate (ไม่รวม VAT)
+ *   per "สื่อ {location} หมวด{expense group}" → per month "งบประมาณ ตาม BG {plan} เดือน {month} {พ.ศ.}"
+ *     → "- item qty unit amount บาท", STORE balance, หมายเหตุ
+ *   then the 14-column table and "จึงเรียนมาเพื่อโปรดพิจารณา".
+ */
+function buildApprovalHtml_(ss, req, o, s, kind) {
+  o = o || {};
+  var d = approvalData_(ss, req);
+  var items = d.items, bgTotal = d.bgTotal, total = d.total, months = d.months, be = d.be;
   var monthText = months.map(function (m) { return THAI_MONTH_FULL[m]; }).join(',') + ' ' + be;
   var team = s.team_name ? ' (' + esc_(s.team_name) + ')' : '';
   var approved = kind === 'purchasing';

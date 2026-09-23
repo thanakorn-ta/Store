@@ -21,6 +21,7 @@ var MEMBER_FNS = [
   'getBudgetOptions', 'importBudget', 'importBudgetFromDrive', 'submitOrderRequest', 'createRound', 'confirmRequest', 'rejectByPc',
   'cancelMyRequest', 'decideRequest', 'requestOverBudget', 'managerDecision', 'issuePo', 'markReceived',
   'getApprovalDraft', 'sendApprovalEmail', 'recordApproval', 'sendPurchasingEmail', 'getAppSettings', 'saveAppSettings',
+  'recallRequest', 'returnForEdit', 'adminUpdateRequest', 'deleteRequest', 'getQuoteFile',
   'listMyRequests', 'listAllRequests', 'installReminderTrigger',
   // admin
   'listMembers', 'saveMember', 'listMasterPc', 'saveMasterPc',

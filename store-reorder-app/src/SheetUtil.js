@@ -49,6 +49,27 @@ function appendObjects_(ss, name, header, objs) {
   h.sheet.getRange(h.sheet.getLastRow() + 1, 1, rows.length, h.header.length).setValues(rows);
 }
 
+/**
+ * Rewrites a sheet keeping only rows where keep(row, col) is true, then appends
+ * `add` objects. Used to replace or delete a request's rows (callers hold the script lock).
+ */
+function rewriteSheetRows_(ss, name, header, keep, add) {
+  var h = ensureHeader_(ss, name, header);
+  var n = h.header.length;
+  var values = h.sheet.getDataRange().getValues();
+  var col = {};
+  h.header.forEach(function (k, i) { col[k] = i; });
+  var rows = values.slice(1).filter(function (r) { return keep(r, col); }).map(function (r) {
+    var out = r.slice(0, n);
+    while (out.length < n) out.push('');
+    return out;
+  });
+  (add || []).forEach(function (o) { rows.push(h.header.map(function (k) { return o[k] == null ? '' : o[k]; })); });
+  h.sheet.clearContents();
+  h.sheet.getRange(1, 1, 1, n).setValues([h.header]).setFontWeight('bold');
+  if (rows.length) h.sheet.getRange(2, 1, rows.length, n).setValues(rows);
+}
+
 function webAppUrl_() {
   try { return ScriptApp.getService().getUrl() || ''; } catch (e) { return ''; }
 }

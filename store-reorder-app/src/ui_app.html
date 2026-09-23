@@ -10,7 +10,8 @@
  * Depends on globals from parsers.js / engine.js and SheetJS (XLSX).
  */
 (() => {
-const STORE_KEY = 'store-reorder-ai:v1';
+// demo mode (web/demo.js) keeps its own copy so trial data never mixes with the real system
+const STORE_KEY = typeof window.DEMO_API === 'function' ? 'store-reorder-ai:demo:v1' : 'store-reorder-ai:v1';
 const AI_KEY = 'store-reorder-ai:apikey';
 const MERGED_SHEET = 'รวมข้อมูล';
 
@@ -59,11 +60,21 @@ let APPS_SCRIPT_URL = (() => {
   } catch { return DEFAULT_APPS_SCRIPT_URL; }
 })();
 const SERVER = GAS || !!APPS_SCRIPT_URL;
-const TOKEN_KEY = 'store-reorder-ai:token';
+const TOKEN_KEY = typeof window.DEMO_API === 'function' ? 'store-reorder-ai:demo:token' : 'store-reorder-ai:token';
 let token = (() => { try { return localStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; } })();
 const setToken = t => { token = t || ''; try { t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY); } catch { /* private mode */ } };
 
+const DRAFT_OWNER_KEY = 'store-reorder-ai:draft-owner';
+// Demo / trial mode (web/demo.js): the server code runs inside this page with sample data
+const DEMO = !GAS && typeof window.DEMO_API === 'function';
+
 function rawCall(fn, args) {
+  if (DEMO) {
+    return new Promise((resolve, reject) => setTimeout(() => {
+      try { resolve(window.DEMO_API(token, fn, args)); renderDemoBar(); }
+      catch (e) { reject(new Error(String((e && e.message) || e))); }
+    }, 80));
+  }
   if (GAS) {
     return new Promise((resolve, reject) =>
       google.script.run.withSuccessHandler(resolve).withFailureHandler(reject).api(token, fn, args));
@@ -279,9 +290,6 @@ function recompute() {
     minmax: f('minmax'), usage: f('usage'), balance: f('balance'), reorder: f('reorder'), baseline: f('baseline')
   }, state.opt);
   bySku = new Map(merged.rows.map(r => [r.sku, r]));
-  // drop cart items whose SKU vanished after a file was removed — but not before the
-  // shared data has arrived from the server, or every reload would empty the basket
-  if (!SERVER || sharedLoaded) for (const sku of Object.keys(state.cart)) if (!bySku.has(sku)) delete state.cart[sku];
 
   renderSlots();
   const has = merged.rows.length > 0;
@@ -306,7 +314,7 @@ document.querySelectorAll('[data-opt]').forEach(i => i.addEventListener('change'
 function renderCards() {
   const s = summarize(merged.rows);
   const nM = merged.months.length;
-  const cartVal = Object.entries(state.cart).reduce((a, [sku, c]) => a + c.qty * (bySku.get(sku)?.cost || 0), 0);
+  const dt = draftTotals();
   const missing = SLOTS.filter(x => x.type !== 'baseline' && !(state.files[x.type] || []).length).map(x => x.title);
   $('#cards').innerHTML = `
     <div class="card"><div class="k">สินค้าทั้งหมด (รวม 4 ไฟล์)</div><div class="v">${fmt(s.skus)}</div>
@@ -321,33 +329,29 @@ function renderCards() {
       <div class="s">ประมาณ ${money(s.actualValue)}</div></div>
     <div class="card dead"><div class="k">Dead stock</div><div class="v">${fmt(s.dead)}</div>
       <div class="s">มูลค่าค้าง ${money(s.deadValue)}</div></div>
-    <div class="card"><div class="k">เลือกสั่งแล้ว</div><div class="v">${fmt(Object.keys(state.cart).length)}</div>
-      <div class="s">ประมาณ ${money(cartVal)}</div></div>
+    <div class="card"><div class="k">ในคำขอที่กำลังทำ</div><div class="v">${fmt(dt.n)}</div>
+      <div class="s">ประมาณ ${money(dt.v)}</div></div>
     ${missing.length ? `<div class="card"><div class="k">ยังไม่ได้นำเข้า</div><div class="s" style="color:var(--warn)">${missing.map(esc).join('<br>')}</div></div>` : ''}`;
   updateCartBar();
 }
 
 // ------------------------------------------------------------ sticky basket (always shows the next step)
 
-function cartTotals() {
-  let n = 0, v = 0;
-  for (const [sku, c] of Object.entries(state.cart)) { n++; v += c.qty * (bySku.get(sku)?.cost || 0); }
-  return { n, v };
-}
-
 function updateCartBar() {
-  const { n, v } = cartTotals();
+  const { n, v } = draftTotals();
   $('#cartBadge').textContent = n;
-  const show = n > 0 && ['compare', 'merged', 'home'].includes(activeTab) && !$('#work').hidden;
+  $('#cartBadge').hidden = !n;
+  const show = n > 0 && ['compare', 'merged', 'home', 'budget'].includes(activeTab) && !$('#work').hidden && isMember();
   $('#cartBar').hidden = !show;
   document.body.classList.toggle('has-cartbar', show);
-  $('#cartBarText').innerHTML = `เลือกแล้ว <b>${fmt(n)}</b> รายการ · ประมาณ <b>${money(v)}</b>`;
+  $('#cartBarText').innerHTML = `${state.draft.editId ? 'กำลังแก้ไข ' + esc(state.draft.editId) + ' · ' : 'ในคำขอ '}<b>${fmt(n)}</b> รายการ · ประมาณ <b>${money(v)}</b>`;
 }
-$('#cartBarBtn').addEventListener('click', () => goTab('cart'));
+$('#cartBarBtn').addEventListener('click', () => goTab('order'));
 
 function goTab(name) {
-  const t = document.querySelector(`.tab[data-tab="${name}"]`);
-  if (t && !t.hidden) t.click();
+  // "requests" has one menu item per role — use the visible one
+  const t = [...document.querySelectorAll(`.tab[data-tab="${name}"]`)].find(x => !x.hidden);
+  if (t) t.click();
 }
 
 function renderPcFilter() {
@@ -370,7 +374,7 @@ function filtered(mode) {
     if (cat && r.category !== cat) return false;
     const any = r.orderStore > 0 || r.orderManual > 0 || r.orderActual > 0;
     switch (show) {
-      case 'any': return any || !!state.cart[r.sku];
+      case 'any': return any || draftHas(r.sku);
       case 'diff': return any && !(r.orderStore === r.orderManual && r.orderManual === r.orderActual);
       case 'store': return r.orderStore > 0;
       case 'actual': return r.orderActual > 0;
@@ -402,7 +406,7 @@ function renderActive() {
   if (activeTab === 'home') renderHome();
   else if (activeTab === 'compare') renderCompare();
   else if (activeTab === 'merged') renderMerged();
-  else if (activeTab === 'cart') { renderCart(); renderSubmitBox(); }
+  else if (activeTab === 'order') renderOrder();
   else if (activeTab === 'requests') loadRequests();
   else if (activeTab === 'admin') { members = null; renderAdmin(); } // always fresh: sign-ups arrive any time
   else if (activeTab === 'budget') renderBudget();
@@ -422,6 +426,10 @@ function spark(r) {
 }
 
 function renderCompare() {
+  const pl = budgetLine(state.pick.key);
+  $('#compareHint').innerHTML = pl
+    ? `ติ๊กรายการที่จะสั่ง → ใส่ใน <b>${esc(pl.label)}</b> · เดือน <b>${THAI_MONTH_FULL[Number(state.pick.month)] || ''}</b> <button class="link-btn" data-go="order">เปลี่ยน Budget</button>`
+    : 'ติ๊กรายการที่จะสั่ง — ยังไม่ได้เลือก Budget: <button class="link-btn" data-go="order">เลือก Budget ก่อน</button> (หรือเลือกทีหลังในหน้าสั่งซื้อ)';
   const rows = filtered();
   const hasBase = rows.some(r => r.base);
   $('#countInfo').textContent = `แสดง ${fmt(rows.length)} จาก ${fmt(merged.rows.length)} รายการ`;
@@ -448,7 +456,7 @@ function renderCompare() {
       </tr>
     </thead>
     <tbody>${rows.map(r => {
-      const c = state.cart[r.sku];
+      const c = draftLineOf(r.sku);
       const m = r.manual;
       const d = r.base ? r.balance - r.base.balance : null;
       return `<tr data-sku="${r.sku}" class="${c ? 'sel' : ''}">
@@ -492,7 +500,7 @@ function renderCompareSimple(rows) {
       <th class="n">แนะนำสั่ง</th><th class="n">จำนวนสั่ง</th><th>ข้อควรรู้</th>
     </tr></thead>
     <tbody>${rows.map(r => {
-      const c = state.cart[r.sku];
+      const c = draftLineOf(r.sku);
       const s = suggestion(r);
       const warn = r.flags.find(f => /ต้องถาม|ไม่ถูกเบิก|ไม่ถึงจุด|≠/.test(f)) || '';
       return `<tr data-sku="${r.sku}" class="${c ? 'sel' : ''}">
@@ -512,13 +520,6 @@ function renderCompareSimple(rows) {
 $('#detailToggle').checked = !!state.detail;
 $('#detailToggle').addEventListener('change', e => { state.detail = e.target.checked; save(); renderCompare(); });
 
-function setPicked(sku, on) {
-  const r = bySku.get(sku);
-  if (!r) return;
-  if (on) state.cart[sku] = state.cart[sku] || { qty: defaultQty(r, state.qtySource), note: '' };
-  else delete state.cart[sku];
-}
-
 $('#tblCompare').addEventListener('change', e => {
   const tr = e.target.closest('tr[data-sku]');
   if (!tr) return;
@@ -528,10 +529,11 @@ $('#tblCompare').addEventListener('change', e => {
     tr.classList.toggle('sel', e.target.checked);
     const q = tr.querySelector('[data-qty]');
     q.disabled = !e.target.checked;
-    q.value = e.target.checked ? state.cart[sku].qty : '';
+    q.value = e.target.checked ? draftLineOf(sku).qty : '';
     if (e.target.checked) q.select();
-  } else if (e.target.matches('[data-qty]') && state.cart[sku]) {
-    state.cart[sku].qty = Math.max(0, Math.round(Number(e.target.value) || 0));
+    if (e.target.checked && !state.pick.key) toast('เพิ่มแล้ว — ยังไม่ได้เลือก Budget: เลือกได้ในหน้า "สั่งซื้อตาม Budget"');
+  } else if (e.target.matches('[data-qty]') && draftLineOf(sku)) {
+    draftLineOf(sku).qty = Math.max(0, Math.round(Number(e.target.value) || 0));
   }
   save(); renderCards();
 });
@@ -572,7 +574,7 @@ function mergedColumns() {
     ['Store: สั่งต่อครั้ง', r => r.store ? r.store.lot : ''],
     ['แนะนำสั่ง (MIN/MAX เดิม)', r => r.orderManual, 1],
     ['แนะนำสั่ง (ใช้จริง)', r => r.orderActual, 1],
-    ['เลือกสั่ง', r => state.cart[r.sku]?.qty ?? '', 1],
+    ['ในคำขอ', r => draftLineOf(r.sku)?.qty ?? '', 1],
     ['มีในไฟล์', r => ['minmax', 'usage', 'balance', 'reorder'].filter(k => r.sources[k]).map(k => ({ minmax: '1', usage: '2', balance: '3', reorder: '4' }[k])).join(',')],
     ['ข้อสังเกต', r => r.flags.join(' | ')]
   );
@@ -590,96 +592,449 @@ function renderMerged() {
     }).join('')}</tr>`).join('')}</tbody>`;
 }
 
-// ------------------------------------------------------------ cart
+// ------------------------------------------------------------ order by budget: pick a budget line + month, then the items
+//
+// state.draft = { lines: [{ uid, sku, name, unit, cost, qty, note, budgetKey, month, pc, pcName, balance, custom }],
+//                 note, over: { "key|month": { on, reason } }, editId, keepFiles: [{ id, name, size }] }
+//   editId    = request called back for editing (resubmitted to the same id)
+//   keepFiles = its quotations already on the server that stay attached
+// state.pick  = { key, month } — the budget line + month the page is filling now
+// New quotation files stay in memory (draftFiles) until the request is sent.
 
-function cartRows() {
-  return Object.entries(state.cart)
-    .map(([sku, c]) => ({ r: bySku.get(sku), c }))
-    .filter(x => x.r)
-    .sort((a, b) => (a.r.pc || a.r.group || 'zz').localeCompare(b.r.pc || b.r.group || 'zz') || a.r.sku.localeCompare(b.r.sku));
-}
-
-function renderCart() {
-  updateStepper();
-  const items = cartRows();
-  const total = items.reduce((a, x) => a + x.c.qty * x.r.cost, 0);
-  $('#cartTotal').textContent = items.length ? `${items.length} รายการ · ประมาณ ${money(total)}` : '';
-  if (!items.length) { $('#cartBody').innerHTML = '<div class="empty">ยังไม่ได้เลือกรายการ — ติ๊กช่อง "สั่ง" ในแท็บเทียบยอดสั่งซื้อ</div>'; return; }
-
-  // per-item budget line + month (blank = the default picked below the table)
-  const withBudget = SERVER && isMember() && budgetOpts && budgetOpts.lines && budgetOpts.lines.length > 0;
-  const lineOpts = withBudget ? budgetOpts.lines.map(l => `<option value="${esc(l.key)}">${esc(l.label)}</option>`).join('') : '';
-  const bSel = c => `<select class="bsel" data-bk title="Budget ของรายการนี้"><option value="">— ตาม Budget ตั้งต้น —</option>${lineOpts}</select>`
-    .replace(`value="${esc(c.budgetKey || '')}"`, `value="${esc(c.budgetKey || '')}" selected`);
-  const mSel = c => `<select class="msel" data-bm title="เดือนที่ใช้ของ"><option value="">— ตั้งต้น —</option>${THAI_MONTH_FULL.slice(1).map((n, i) =>
-    `<option value="${i + 1}" ${Number(c.month) === i + 1 ? 'selected' : ''}>${n}</option>`).join('')}</select>`;
-
-  const groups = new Map();
-  for (const x of items) {
-    const k = x.r.pc ? `${x.r.pc} ${x.r.pcName}` : (x.r.group || 'ไม่ระบุ PC');
-    if (!groups.has(k)) groups.set(k, []);
-    groups.get(k).push(x);
+const uid = () => Math.random().toString(36).slice(2, 10);
+state.draft = state.draft || {};
+state.draft = { lines: [], note: '', over: {}, editId: null, keepFiles: [], ...state.draft };
+state.pick = state.pick || { key: '', month: new Date().getMonth() + 1 };
+if (state.cart && Object.keys(state.cart).length) { // older versions kept a flat cart keyed by SKU
+  for (const [sku, c] of Object.entries(state.cart)) {
+    state.draft.lines.push({ uid: uid(), sku, qty: Math.max(1, Number(c.qty) || 1), note: c.note || '', budgetKey: c.budgetKey || '', month: Number(c.month) || 0 });
   }
-  $('#cartBody').innerHTML = [...groups].map(([g, list]) => {
-    const sub = list.reduce((a, x) => a + x.c.qty * x.r.cost, 0);
-    return `<div class="cart-group"><h3><span>${esc(g)}</span><span class="num">${money(sub)}</span></h3>
-      <div class="table-wrap" style="max-height:none"><table class="grid"><thead><tr>
-        <th>รหัส</th><th>สินค้า</th><th class="n">คงเหลือ</th><th class="n col-store">Store</th><th class="n col-manual">MIN/MAX เดิม</th>
-        <th class="n col-actual">ใช้จริง</th><th class="n">จำนวนสั่ง</th><th>หน่วย</th><th class="n">ราคา/หน่วย</th><th class="n">รวม</th>
-        ${withBudget ? '<th>Budget / เดือน</th>' : ''}<th>ขอบเขตการใช้งาน / หมายเหตุ</th><th></th>
-      </tr></thead><tbody>${list.map(({ r, c }) => `<tr data-sku="${r.sku}">
-        <td class="sku">${r.sku}</td><td class="name">${esc(r.name)}${r.category === CATEGORY.JOB ? ' ' + catTag(r.category) : ''}</td>
-        <td class="n">${fmt(r.balance)}</td><td class="n col-store">${o(r.orderStore)}</td><td class="n col-manual">${o(r.orderManual)}</td><td class="n col-actual">${o(r.orderActual)}</td>
-        <td class="n"><input class="qty" type="number" min="0" step="1" data-qty value="${c.qty}"></td>
-        <td>${esc(r.unit)}</td><td class="n">${fmt(r.cost, 2)}</td><td class="n">${fmt(c.qty * r.cost, 2)}</td>
-        ${withBudget ? `<td class="bcell">${bSel(c)}${mSel(c)}</td>` : ''}
-        <td><input class="note" data-note value="${esc(c.note)}" placeholder="เช่น ใช้ล้างแกนมอเตอร์ป้าย…"></td>
-        <td><button class="icon-btn" data-unpick title="เอาออก" aria-label="เอาออก">×</button></td>
-      </tr>`).join('')}</tbody></table></div></div>`;
-  }).join('');
+}
+state.cart = {};
+let draftFiles = [];
+
+// a budget line's key itself contains "|" (company|location|gl), so split "key|month" from the right
+const splitKM = k => ({ key: String(k).slice(0, String(k).lastIndexOf('|')), month: Number(String(k).slice(String(k).lastIndexOf('|') + 1)) || 0 });
+
+const lineStore = l => bySku.get(l.sku);
+const lineName = l => l.name || (lineStore(l) || {}).name || l.sku;
+const lineUnit = l => l.unit || (lineStore(l) || {}).unit || '';
+const lineCost = l => Number(l.cost != null && l.cost !== '' ? l.cost : (lineStore(l) || {}).cost) || 0;
+const lineAmt = l => (Number(l.qty) || 0) * lineCost(l);
+const lineBalance = l => { const r = lineStore(l); return r ? r.balance : (l.balance ?? ''); };
+const snapshot = r => ({ sku: r.sku, name: r.name, unit: r.unit, cost: r.cost || 0, pc: r.pc || r.group || '', pcName: r.pcName || r.group || '', balance: r.balance });
+const budgetLine = key => budgetOpts && budgetOpts.lines ? budgetOpts.lines.find(l => l.key === key) : null;
+const hasBudget = () => !!(budgetOpts && budgetOpts.lines && budgetOpts.lines.length);
+
+function draftTotals() {
+  const ls = state.draft.lines;
+  return { n: ls.length, v: ls.reduce((a, l) => a + lineAmt(l), 0) };
+}
+const cartTotals = draftTotals; // older name used by the sticky bar / home
+const draftHas = sku => state.draft.lines.some(l => l.sku === sku);
+const draftLineOf = sku => state.draft.lines.find(l => l.sku === sku);
+const draftAmtFor = (key, m) => state.draft.lines.filter(l => l.budgetKey === key && Number(l.month) === Number(m)).reduce((a, l) => a + lineAmt(l), 0);
+
+/** Adds an item to the budget line + month being filled (same item there again = +qty). */
+function addLine(item, qty) {
+  const key = state.pick.key || '', month = key ? Number(state.pick.month) || 0 : 0;
+  const same = !item.custom && state.draft.lines.find(l => l.sku === item.sku && l.budgetKey === key && Number(l.month) === month);
+  if (same) { same.qty = (Number(same.qty) || 0) + Math.max(1, Math.round(qty || 1)); return same; }
+  const l = { uid: uid(), ...item, qty: Math.max(1, Math.round(qty || 1)), note: '', budgetKey: key, month };
+  state.draft.lines.push(l);
+  return l;
 }
 
-$('#cartBody').addEventListener('change', e => {
-  const tr = e.target.closest('tr[data-sku]');
-  if (!tr || !state.cart[tr.dataset.sku]) return;
-  const c = state.cart[tr.dataset.sku];
-  if (e.target.matches('[data-qty]')) c.qty = Math.max(0, Math.round(Number(e.target.value) || 0));
-  if (e.target.matches('[data-note]')) c.note = e.target.value;
-  if (e.target.matches('[data-bk]')) c.budgetKey = e.target.value;
-  if (e.target.matches('[data-bm]')) c.month = Number(e.target.value) || '';
-  save(); renderCards(); renderCart(); if (budgetOpts) renderBudgetInfo();
+/** Store suggestion page: tick = add to the budget being filled, untick = remove everywhere. */
+function setPicked(sku, on) {
+  const r = bySku.get(sku);
+  if (!r) return;
+  if (on) { if (!draftHas(sku)) addLine(snapshot(r), Math.max(1, defaultQty(r, state.qtySource) || suggestion(r).qty || 1)); }
+  else state.draft.lines = state.draft.lines.filter(l => l.sku !== sku);
+}
+
+/** Draft grouped by budget line x month: [{ k, key, month, line, amount, n, b, after, over }]. */
+function draftGroups() {
+  const g = new Map();
+  for (const l of state.draft.lines) {
+    const key = l.budgetKey || '', month = key ? Number(l.month) || 0 : 0, k = key + '|' + month;
+    if (!g.has(k)) g.set(k, { k, key, month, amount: 0, n: 0 });
+    const x = g.get(k); x.amount += lineAmt(l); x.n++;
+  }
+  return [...g.values()].map(x => {
+    x.line = budgetLine(x.key);
+    if (x.line && x.month) { x.b = budgetAvail(x.line, x.month); x.after = x.b.available - x.amount; x.over = x.after < -0.004; }
+    return x;
+  }).sort((a, b) => (a.line ? 0 : 1) - (b.line ? 0 : 1) || (a.line && b.line ? a.line.label.localeCompare(b.line.label) : 0) || a.month - b.month);
+}
+
+function renderOrder() {
+  updateCartBar();
+  const body = $('#orderBody'), empty = $('#orderEmpty');
+  const ed = state.draft.editId;
+  $('#orderEditing').hidden = !ed;
+  $('#orderEditing').innerHTML = ed ? `<b>กำลังแก้ไขคำขอ ${esc(ed)}</b> — แก้รายการ / Budget / ใบเสนอราคา แล้วกด "บันทึกและส่งใหม่" · คำขอจะกลับไปรอ Admin ตรวจ` : '';
+  $('#btnSubmitReq').textContent = ed ? 'บันทึกและส่งใหม่ให้ Admin ตรวจ' : 'ส่งให้ Admin ตรวจ';
+  $('#btnCancelEdit').hidden = !ed;
+  $('#roundBox').hidden = !isAdmin() || !!ed;
+  if (!isMember()) { body.hidden = true; empty.innerHTML = ''; return; }
+  if (!budgetOpts) { body.hidden = true; empty.innerHTML = '<div class="empty">กำลังโหลด Budget…</div>'; return; }
+  if (budgetOpts.error || !hasBudget()) {
+    body.hidden = true;
+    empty.innerHTML = `<div class="alert-row"><span>${budgetOpts.error ? 'โหลด Budget ไม่ได้: ' + esc(budgetOpts.error)
+      : 'ยังไม่มีข้อมูล Budget — ' + (isAdmin() ? 'นำเข้าไฟล์ Budget ที่ สมาชิก &amp; ตั้งค่า ก่อน' : 'รอ Admin นำเข้าไฟล์ Budget')}</span>
+      ${isAdmin() ? '<button class="btn sm" data-go="admin">ไปนำเข้า</button>' : ''}</div>`;
+    return;
+  }
+  empty.innerHTML = '';
+  body.hidden = false;
+  if (state.pick.key && !budgetLine(state.pick.key)) state.pick.key = '';
+  renderBudgetPicker();
+  renderItemsCard();
+  renderOrderSummary();
+  renderFileList();
+  if (document.activeElement !== $('#reqNote')) $('#reqNote').value = state.draft.note || '';
+}
+
+function lineYearLeft(line) {
+  let left = 0;
+  for (let m = 1; m <= 12; m++) left += budgetAvail(line, m).available - draftAmtFor(line.key, m);
+  return left;
+}
+
+function renderBudgetPicker() {
+  const words = $('#obSearch').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const used = new Set(state.draft.lines.map(l => l.budgetKey));
+  const list = budgetOpts.lines.filter(l => words.every(w => (l.label + ' ' + l.expenseGroup + ' ' + (l.mediaType || '')).toLowerCase().includes(w)));
+  $('#obList').innerHTML = list.length ? list.map(l => {
+    const left = lineYearLeft(l);
+    const n = state.draft.lines.filter(x => x.budgetKey === l.key).length;
+    return `<button class="bl-item ${l.key === state.pick.key ? 'sel' : ''}" data-pickkey="${esc(l.key)}">
+      <span class="bl-main"><b>${esc(l.location)}</b> · ${esc(l.glCode)} ${esc(l.glName)}<span class="bl-sub">${esc(l.company)}${l.expenseGroup ? ' · ' + esc(l.expenseGroup) : ''}</span></span>
+      <span class="bl-side">${n ? `<span class="badge">${n}</span>` : ''}<span class="num ${left < 0 ? 'over' : 'ok'}">${money(left)}</span><span class="bl-sub">เหลือทั้งปี</span></span>
+      ${used.has(l.key) && l.key !== state.pick.key ? '<span class="bl-dot" title="มีรายการในคำขอนี้"></span>' : ''}</button>`;
+  }).join('') : '<div class="empty-sm">ไม่พบ Budget ที่ค้นหา</div>';
+
+  const line = budgetLine(state.pick.key);
+  if (!line) {
+    $('#obMonths').innerHTML = '<p class="hint">เลือก Budget ด้านบนก่อน</p>';
+    $('#obPickInfo').innerHTML = '';
+    return;
+  }
+  const cur = new Date().getMonth() + 1;
+  $('#obMonths').innerHTML = MONTHS_1_12.map(m => {
+    const b = budgetAvail(line, m);
+    const left = b.available - draftAmtFor(line.key, m);
+    const n = state.draft.lines.filter(x => x.budgetKey === line.key && Number(x.month) === m).length;
+    return `<button class="mp ${Number(state.pick.month) === m ? 'sel' : ''} ${left < 0 ? 'over' : ''} ${b.plan ? '' : 'nobudget'}" data-pickmonth="${m}"
+        title="${THAI_MONTH_FULL[m]}: งบ ${money(b.plan)} · เหลือ ${money(left)}">
+      <span class="mp-m">${MONTH_SHORT[m - 1]}${m === cur ? ' •' : ''}</span><span class="mp-v">${fmtK(left)}</span>${n ? `<span class="mp-n">${n}</span>` : ''}</button>`;
+  }).join('');
+  const m = Number(state.pick.month) || cur;
+  const b = budgetAvail(line, m);
+  const mine = draftAmtFor(line.key, m);
+  const after = b.available - mine;
+  const remark = (line.months[m] || {}).remark;
+  $('#obPickInfo').innerHTML = `
+    <div class="pi-title">${esc(line.label)} · <b>${THAI_MONTH_FULL[m]} ${budgetOpts.year || ''}</b></div>
+    <div class="pi-grid">
+      <div><span>งบตาม BG</span><b>${money(b.plan)}</b></div>
+      <div><span>ใช้จริงแล้ว</span><b>${money(b.actual)}</b></div>
+      <div><span>คำขออื่นในระบบ</span><b>${money(b.reserved)}</b></div>
+      <div><span>คำขอนี้</span><b>${money(mine)}</b></div>
+      <div class="${after < 0 ? 'over' : 'ok'}"><span>คงเหลือหลังคำขอนี้</span><b>${money(after)}</b></div>
+    </div>
+    ${useBar({ plan: b.plan, actual: b.actual, committed: b.reserved, pending: mine, left: after })}
+    ${remark ? `<div class="hint">Remark ตาม Budget: ${esc(remark)}</div>` : ''}
+    ${after < 0 ? '<div class="over-note">งบเดือนนี้ไม่พอ — ส่งได้โดยติ๊ก "ขอ Over Budget" พร้อมเหตุผลในสรุปด้านขวา หรือเลือกเดือน/Budget อื่น</div>' : ''}`;
+}
+
+$('#obSearch').addEventListener('input', () => { if (hasBudget()) renderBudgetPicker(); });
+$('#obList').addEventListener('click', e => {
+  const b = e.target.closest('[data-pickkey]');
+  if (!b) return;
+  state.pick.key = b.dataset.pickkey;
+  state.pick.month = Number(state.pick.month) || new Date().getMonth() + 1;
+  save(); renderOrder();
 });
-$('#cartBody').addEventListener('click', e => {
-  if (!e.target.matches('[data-unpick]')) return;
-  delete state.cart[e.target.closest('tr').dataset.sku];
-  save(); renderCards(); renderCart(); if (budgetOpts) renderBudgetInfo();
+$('#obMonths').addEventListener('click', e => {
+  const b = e.target.closest('[data-pickmonth]');
+  if (!b) return;
+  state.pick.month = Number(b.dataset.pickmonth);
+  save(); renderOrder();
+});
+
+function renderItemsCard() {
+  const line = budgetLine(state.pick.key);
+  const m = Number(state.pick.month);
+  const ready = !!(line && m);
+  $('#itemsCard').classList.toggle('disabled', !ready);
+  $('#oiSearch').disabled = !ready;
+  $('#itemsFor').innerHTML = ready ? `กำลังใส่รายการใน <b>${esc(line.label)}</b> · เดือน <b>${THAI_MONTH_FULL[m]}</b>`
+    : 'เลือก Budget และเดือนในขั้นที่ 1–2 ก่อน แล้วค้นหาสินค้าที่จะสั่ง';
+
+  // suggested items from Store that are not in this request yet
+  const sug = ready && merged.rows.length ? merged.rows.filter(r => suggestion(r).qty > 0 && !draftHas(r.sku))
+    .sort((a, b) => suggestion(b).qty * b.cost - suggestion(a).qty * a.cost).slice(0, 10) : [];
+  $('#oiSuggest').innerHTML = sug.length ? `<span class="hint">แนะนำจาก Store:</span> ${sug.map(r =>
+    `<button class="chip" data-addsku="${esc(r.sku)}" data-qty="${suggestion(r).qty}" title="${esc(r.sku)} · คงเหลือ ${fmt(r.balance)} ${esc(r.unit)}">+ ${esc(r.name)} <b>${fmt(suggestion(r).qty)}</b></button>`).join('')}` : '';
+
+  const lines = ready ? state.draft.lines.filter(l => l.budgetKey === line.key && Number(l.month) === m) : [];
+  const monthOpts = sel => MONTHS_1_12.map(x => `<option value="${x}" ${x === sel ? 'selected' : ''}>${MONTH_SHORT[x - 1]}</option>`).join('');
+  $('#oiLines').innerHTML = !ready ? '' : !lines.length
+    ? '<div class="empty-sm">ยังไม่มีรายการในงบนี้ — ค้นหาสินค้าด้านบน กดรายการแนะนำ หรือเพิ่มรายการที่ไม่มีใน Store</div>'
+    : `<div class="table-wrap" style="max-height:none"><table class="grid order-lines"><thead><tr>
+        <th>สินค้า</th><th class="n">Store คงเหลือ</th><th class="n">จำนวน</th><th>หน่วย</th><th class="n">ราคา/หน่วย</th><th class="n">รวม</th>
+        <th>ขอบเขตการใช้งาน / หมายเหตุ</th><th>เดือน</th><th></th></tr></thead>
+      <tbody>${lines.map(l => `<tr data-uid="${l.uid}">
+        <td class="name"><b class="item-name">${esc(lineName(l))}</b><div class="pc">${l.custom ? 'รายการใหม่ (ไม่มีใน Store)' : esc(l.sku) + (l.pc ? ' · ' + esc(l.pc) : '')}</div></td>
+        <td class="n">${lineBalance(l) === '' ? '–' : fmt(lineBalance(l))}</td>
+        <td class="n"><input class="qty" type="number" min="0" step="1" data-f="qty" value="${esc(l.qty)}"></td>
+        <td>${l.custom ? `<input class="unit-in" data-f="unit" value="${esc(l.unit || '')}">` : esc(lineUnit(l))}</td>
+        <td class="n"><input class="qty" type="number" min="0" step="0.01" data-f="cost" value="${esc(lineCost(l))}" title="แก้ราคาได้ เช่น ตามใบเสนอราคา"></td>
+        <td class="n"><b>${fmt(lineAmt(l), 2)}</b></td>
+        <td><input class="note" data-f="note" value="${esc(l.note || '')}" placeholder="เช่น ใช้ล้างแกนมอเตอร์ป้าย…"></td>
+        <td><select data-f="month" title="ย้ายไปเดือนอื่น">${monthOpts(Number(l.month))}</select></td>
+        <td><button class="icon-btn" data-rmline title="เอาออก" aria-label="เอาออก">×</button></td>
+      </tr>`).join('')}</tbody>
+      <tfoot><tr><th colspan="5">รวมในงบนี้ (${lines.length} รายการ)</th><th class="n">${fmt(lines.reduce((a, l) => a + lineAmt(l), 0), 2)}</th><th colspan="3"></th></tr></tfoot></table></div>`;
+}
+
+// search the Store items
+function renderItemSearch() {
+  const q = $('#oiSearch').value.trim().toLowerCase();
+  const box = $('#oiResults');
+  if (!q) { box.hidden = true; box.innerHTML = ''; return; }
+  const words = q.split(/\s+/);
+  const hits = merged.rows.filter(r => words.every(w => (r.sku + ' ' + r.name + ' ' + (r.pc || '') + ' ' + (r.pcName || r.group || '')).toLowerCase().includes(w))).slice(0, 12);
+  box.hidden = false;
+  box.innerHTML = hits.length ? hits.map((r, i) => {
+    const s = suggestion(r);
+    return `<button class="sg-item ${i === 0 ? 'first' : ''}" data-addsku="${esc(r.sku)}" data-qty="${s.qty > 0 ? s.qty : 1}">
+      <span><b>${esc(r.name)}</b><span class="pc">${esc(r.sku)} · ${esc(r.pc || r.group || '')} · ${money(r.cost)}/${esc(r.unit)}</span></span>
+      <span class="sg-side">คงเหลือ ${fmt(r.balance)}${s.qty > 0 ? ` · แนะนำ <b>${fmt(s.qty)}</b>` : ''}${draftHas(r.sku) ? ' · <span class="ok">มีในคำขอแล้ว</span>' : ''}</span></button>`;
+  }).join('') : `<div class="empty-sm">ไม่พบ "${esc(q)}" ใน Store — ${merged.rows.length ? 'ใช้ "+ เพิ่มรายการที่ไม่มีใน Store"' : 'ยังไม่มีข้อมูล Store'}</div>`;
+}
+$('#oiSearch').addEventListener('input', renderItemSearch);
+$('#oiSearch').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); const f = $('#oiResults [data-addsku]'); if (f) f.click(); }
+  if (e.key === 'Escape') { e.target.value = ''; renderItemSearch(); }
+});
+document.addEventListener('click', e => {
+  const add = e.target.closest('#tab-order [data-addsku]');
+  if (!add) return;
+  const r = bySku.get(add.dataset.addsku);
+  if (!r) return;
+  addLine(snapshot(r), Number(add.dataset.qty) || 1);
+  $('#oiSearch').value = ''; renderItemSearch();
+  save(); renderOrder(); renderCards();
+  toast(`เพิ่ม ${r.name} แล้ว`);
+  $('#oiSearch').focus();
+});
+$('#oiNewForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const f = e.target;
+  addLine({ sku: '', name: f.name.value.trim(), unit: f.unit.value.trim(), cost: Number(f.cost.value) || 0, custom: true }, Number(f.qty.value) || 1);
+  f.reset(); save(); renderOrder(); renderCards();
+});
+$('#oiLines').addEventListener('change', e => {
+  const tr = e.target.closest('tr[data-uid]');
+  const l = tr && state.draft.lines.find(x => x.uid === tr.dataset.uid);
+  if (!l || !e.target.dataset.f) return;
+  const f = e.target.dataset.f;
+  if (f === 'qty') l.qty = Math.max(0, Math.round(Number(e.target.value) || 0));
+  else if (f === 'cost') l.cost = Math.max(0, Number(e.target.value) || 0);
+  else if (f === 'month') l.month = Number(e.target.value);
+  else l[f] = e.target.value;
+  save(); renderOrder(); renderCards();
+});
+$('#oiLines').addEventListener('click', e => {
+  if (!e.target.matches('[data-rmline]')) return;
+  const id = e.target.closest('tr').dataset.uid;
+  state.draft.lines = state.draft.lines.filter(l => l.uid !== id);
+  save(); renderOrder(); renderCards();
+});
+
+function renderOrderSummary() {
+  const groups = draftGroups();
+  const total = groups.reduce((a, x) => a + x.amount, 0);
+  const over = state.draft.over || (state.draft.over = {});
+  if (!groups.length) {
+    $('#oSummary').innerHTML = '<div class="empty-sm">ยังไม่มีรายการ<br>เลือก Budget + เดือน แล้วใส่สินค้าที่จะสั่ง</div>';
+    return;
+  }
+  $('#oSummary').innerHTML = groups.map(x => {
+    if (!x.line || !x.month) {
+      return `<div class="bline warn"><div class="bline-head"><b>${x.n} รายการยังไม่ได้เลือก Budget</b><span class="num">${money(x.amount)}</span></div>
+        <button class="btn sm" data-assign="${esc(x.k)}" ${budgetLine(state.pick.key) ? '' : 'disabled'}>ใส่ใน Budget ที่เลือกอยู่</button></div>`;
+    }
+    const ob = over[x.k] || {};
+    const cur = x.key === state.pick.key && x.month === Number(state.pick.month);
+    return `<div class="bline ${x.over ? 'is-over' : ''} ${cur ? 'cur' : ''}">
+      <button class="bline-head link" data-gopick="${esc(x.k)}" title="เปิดงบนี้"><b>${esc(x.line.location)} · ${esc(x.line.glCode)}</b>
+        <span class="hint">${THAI_MONTH_FULL[x.month]} · ${x.n} รายการ</span></button>
+      <div class="row"><span>คำขอนี้</span><b>${money(x.amount)}</b></div>
+      <div class="row"><span>คงเหลือหลังส่ง</span><b class="${x.over ? 'over' : 'ok'}">${money(x.after)}</b></div>
+      ${x.over ? `<label class="over-req"><input type="checkbox" data-over-on="${esc(x.k)}" ${ob.on ? 'checked' : ''}> ขอ Over Budget (เกิน ${money(-x.after)})</label>
+        <input class="over-reason" data-over-reason="${esc(x.k)}" value="${esc(ob.reason || '')}" placeholder="เหตุผลที่ขอเกินงบ (จำเป็น)" ${ob.on ? '' : 'hidden'}>` : ''}
+    </div>`;
+  }).join('') + `<div class="row total"><span>รวม ${state.draft.lines.length} รายการ (ไม่รวม VAT)</span><b>${money(total)}</b></div>`;
+}
+
+$('#oSummary').addEventListener('click', e => {
+  const go = e.target.closest('[data-gopick]');
+  if (go) { state.pick = splitKM(go.dataset.gopick); save(); renderOrder(); $('#itemsCard').scrollIntoView({ block: 'start', behavior: 'smooth' }); return; }
+  const as = e.target.closest('[data-assign]');
+  if (as && budgetLine(state.pick.key)) {
+    state.draft.lines.forEach(l => { if (!budgetLine(l.budgetKey) || !Number(l.month)) { l.budgetKey = state.pick.key; l.month = Number(state.pick.month); } });
+    save(); renderOrder();
+  }
+});
+$('#oSummary').addEventListener('change', e => {
+  const k = e.target.dataset.overOn;
+  if (k == null) return;
+  state.draft.over[k] = { ...(state.draft.over[k] || {}), on: e.target.checked };
+  save(); renderOrderSummary();
+  if (e.target.checked) { const inp = $('#oSummary').querySelector(`[data-over-reason="${CSS.escape(k)}"]`); if (inp) inp.focus(); }
+});
+$('#oSummary').addEventListener('input', e => {
+  const k = e.target.dataset.overReason;
+  if (k == null) return;
+  state.draft.over[k] = { ...(state.draft.over[k] || {}), on: true, reason: e.target.value };
+  save();
+});
+$('#reqNote').addEventListener('input', e => { state.draft.note = e.target.value; save(); });
+
+// ---- quotations
+const MAX_FILE = 5 * 1024 * 1024, MAX_TOTAL = 10 * 1024 * 1024, MAX_FILES = 5;
+const kb = n => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
+function renderFileList() {
+  const keep = state.draft.keepFiles || [];
+  $('#oFileList').innerHTML = keep.map(f => `<li><span class="file-chip" data-file="${esc(f.id)}">📎 ${esc(f.name)}</span><span class="hint">${kb(f.size)} · แนบไว้แล้ว</span>
+      <button class="icon-btn" data-rmkeep="${esc(f.id)}" title="เอาออก" aria-label="เอาออก">×</button></li>`).join('') +
+    draftFiles.map((f, i) => `<li><span class="file-chip new">📎 ${esc(f.name)}</span><span class="hint">${kb(f.size)}</span>
+      <button class="icon-btn" data-rmfile="${i}" title="เอาออก" aria-label="เอาออก">×</button></li>`).join('');
+}
+const readDataUrl = file => new Promise((resolve, reject) => { const fr = new FileReader(); fr.onload = () => resolve(fr.result); fr.onerror = () => reject(fr.error); fr.readAsDataURL(file); });
+$('#oFiles').addEventListener('change', async e => {
+  const files = [...e.target.files];
+  e.target.value = '';
+  for (const f of files) {
+    const count = draftFiles.length + (state.draft.keepFiles || []).length;
+    const total = draftFiles.reduce((a, x) => a + x.size, 0) + (state.draft.keepFiles || []).reduce((a, x) => a + x.size, 0);
+    if (count >= MAX_FILES) { toast(`แนบได้สูงสุด ${MAX_FILES} ไฟล์`); break; }
+    if (f.size > MAX_FILE) { toast(`${f.name} ใหญ่เกิน 5 MB`); continue; }
+    if (total + f.size > MAX_TOTAL) { toast('ไฟล์แนบรวมเกิน 10 MB'); break; }
+    draftFiles.push({ name: f.name, type: f.type || 'application/octet-stream', size: f.size, data: await readDataUrl(f) });
+  }
+  renderFileList();
+});
+$('#oFileList').addEventListener('click', e => {
+  const rm = e.target.closest('[data-rmfile]');
+  if (rm) { draftFiles.splice(Number(rm.dataset.rmfile), 1); renderFileList(); return; }
+  const rk = e.target.closest('[data-rmkeep]');
+  if (rk) { state.draft.keepFiles = state.draft.keepFiles.filter(f => f.id !== rk.dataset.rmkeep); save(); renderFileList(); }
+});
+
+function resetDraft() {
+  state.draft = { lines: [], note: '', over: {}, editId: null, keepFiles: [] };
+  draftFiles = [];
+  save();
+}
+
+$('#btnSubmitReq').addEventListener('click', async () => {
+  const lines = state.draft.lines.filter(l => Number(l.qty) > 0);
+  if (!lines.length) return toast('ยังไม่มีรายการ หรือจำนวนเป็น 0');
+  const groups = draftGroups().filter(x => x.amount > 0 || x.n);
+  if (groups.some(x => !x.line || !x.month)) return toast('ยังมีรายการที่ไม่ได้เลือก Budget / เดือน');
+  const over = groups.filter(x => x.over);
+  const notAsked = over.filter(x => !(state.draft.over[x.k] && state.draft.over[x.k].on && String(state.draft.over[x.k].reason || '').trim()));
+  if (notAsked.length) {
+    renderOrderSummary();
+    return toast(`งบไม่พอ ${notAsked.length} Budget — ติ๊ก "ขอ Over Budget" และใส่เหตุผล หรือเปลี่ยน Budget / เดือน / จำนวน`);
+  }
+  const total = groups.reduce((a, x) => a + x.amount, 0);
+  const nFiles = draftFiles.length + (state.draft.keepFiles || []).length;
+  const ed = state.draft.editId;
+  if (!confirm(`${ed ? 'ส่งคำขอ ' + ed + ' ที่แก้ไขแล้ว' : 'ส่งคำขอ'} ${lines.length} รายการ รวม ${money(total)} (ไม่รวม VAT)\n` +
+    groups.map(x => `• ${x.line.label} · ${THAI_MONTH_FULL[x.month]} · ${money(x.amount)}${x.over ? ' (ขอ Over Budget)' : ''}`).join('\n') +
+    (nFiles ? `\nแนบใบเสนอราคา ${nFiles} ไฟล์` : '') + '\n\nส่งให้ Admin ตรวจ — ยืนยัน?')) return;
+  const overReasons = {};
+  over.forEach(x => { overReasons[x.k] = String(state.draft.over[x.k].reason).trim(); });
+  $('#btnSubmitReq').disabled = true;
+  $('#submitHint').textContent = nFiles ? 'กำลังส่ง (อัปโหลดใบเสนอราคา)…' : 'กำลังส่ง…';
+  try {
+    const res = await gasCall('submitOrderRequest', {
+      editId: ed || '', keepFileIds: (state.draft.keepFiles || []).map(f => f.id),
+      note: state.draft.note || '', overReasons,
+      files: draftFiles.map(f => ({ name: f.name, type: f.type, data: f.data })),
+      items: lines.map(l => ({ sku: l.custom ? '' : l.sku, name: lineName(l), pc: l.pc || (lineStore(l) || {}).pc || '', pcName: l.pcName || '',
+        unit: lineUnit(l), qty: Number(l.qty), unitCost: lineCost(l), note: l.note || '', budgetKey: l.budgetKey, month: Number(l.month),
+        storeBalance: lineBalance(l) }))
+    });
+    resetDraft();
+    toast(`${res.resubmitted ? 'ส่งคำขอ ' + res.id + ' ที่แก้ไขแล้ว' : 'ส่งคำขอ ' + res.id + ' แล้ว'}${res.overBudget ? ' (มีขอ Over Budget)' : ''} — Admin ได้รับอีเมลแจ้ง`);
+    renderCards(); refreshBudget();
+    $('#reqFilter').value = '';
+    focusReq = res.id;
+    await loadRequests(true);
+    goTab('requests');
+  } catch (e) {
+    toast('ส่งไม่สำเร็จ: ' + errMsg(e));
+  } finally {
+    $('#btnSubmitReq').disabled = false;
+    $('#submitHint').textContent = '';
+  }
+});
+
+$('#btnCancelEdit').addEventListener('click', () => {
+  if (!confirm(`ยกเลิกการแก้ไข ${state.draft.editId}?\nรายการในหน้านี้จะถูกล้าง — คำขอยังอยู่ในสถานะ "รอผู้ขอแก้ไข" กดแก้ไขใหม่ได้ภายหลัง`)) return;
+  resetDraft(); renderOrder(); renderCards();
 });
 $('#btnClearCart').addEventListener('click', () => {
-  if (!confirm('ล้างรายการที่เลือกทั้งหมด?')) return;
-  state.cart = {}; save(); renderCards(); renderCart(); if (budgetOpts) renderBudgetInfo();
+  if (!state.draft.lines.length && !draftFiles.length) return;
+  if (!confirm('ล้างรายการในคำขอนี้ทั้งหมด?')) return;
+  const ed = state.draft.editId, keep = state.draft.keepFiles;
+  resetDraft();
+  if (ed) { state.draft.editId = ed; state.draft.keepFiles = keep; save(); }
+  renderOrder(); renderCards();
 });
 
+/** Loads a request (called back / sent back) into the order page to edit and resubmit. */
+function loadIntoDraft(r) {
+  if (state.draft.lines.length && state.draft.editId !== r.request_id &&
+    !confirm('มีรายการที่ยังไม่ได้ส่งอยู่ในหน้าสั่งซื้อ — แทนที่ด้วยคำขอ ' + r.request_id + '?')) return false;
+  const over = {};
+  const lines = r.items.filter(i => i.qty > 0).map(i => {
+    const key = i.budget_key || r.budget_key, month = Number(i.budget_month || r.budget_month) || 0;
+    if (i.over_budget) over[key + '|' + month] = { on: true, reason: i.over_reason };
+    return { uid: uid(), sku: i.sku, name: i.name, unit: i.unit, cost: i.unit_cost, qty: i.qty, note: i.note, budgetKey: key, month,
+      pc: i.pc_code, pcName: i.pc_name, balance: i.store_balance, custom: !bySku.has(i.sku) };
+  });
+  state.draft = { lines, note: r.note || '', over, editId: r.request_id, keepFiles: (r.files || []).slice() };
+  draftFiles = [];
+  if (lines.length) state.pick = { key: lines[0].budgetKey, month: lines[0].month };
+  save();
+  return true;
+}
+
 function cartSheetRows() {
-  return cartRows().map(({ r, c }) => ({
-    'PC': r.pc, 'ชื่อ PC': r.pcName || r.group, 'รหัสสินค้า': r.sku, 'สินค้า': r.name, 'หน่วย': r.unit,
-    'คงเหลือ': r.balance, 'จำนวนสั่ง': c.qty, 'ราคา/หน่วย': r.cost, 'รวมเงิน': Math.round(c.qty * r.cost * 100) / 100,
-    'Store แจ้ง': r.orderStore, 'MIN/MAX เดิม': r.orderManual, 'ใช้จริง': r.orderActual,
-    'ประเภท': r.category, 'หมายเหตุ': c.note
-  }));
+  return state.draft.lines.map(l => {
+    const line = budgetLine(l.budgetKey);
+    return { 'Budget': line ? line.label : '', 'เดือน': THAI_MONTH_FULL[Number(l.month)] || '', 'PC': l.pc || '', 'รหัสสินค้า': l.custom ? '' : l.sku,
+      'สินค้า': lineName(l), 'หน่วย': lineUnit(l), 'Store คงเหลือ': lineBalance(l), 'จำนวนสั่ง': l.qty, 'ราคา/หน่วย': lineCost(l),
+      'รวมเงิน': Math.round(lineAmt(l) * 100) / 100, 'ขอบเขตการใช้งาน': l.note || '' };
+  });
 }
 
 const stamp = () => new Date().toISOString().slice(0, 10);
 
 $('#btnExportCart').addEventListener('click', () => {
   const rows = cartSheetRows();
-  if (!rows.length) return toast('ยังไม่ได้เลือกรายการ');
+  if (!rows.length) return toast('ยังไม่มีรายการ');
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'รายการที่เลือกสั่งซื้อ');
-  XLSX.writeFile(wb, `ใบขอซื้อ_${stamp()}.xlsx`);
-});
-$('#btnCopyCart').addEventListener('click', async () => {
-  const txt = cartSheetRows().map(x => `${x.PC}\t${x['รหัสสินค้า']}\t${x['สินค้า']}\t${x['จำนวนสั่ง']}\t${x['หน่วย']}\t${x['หมายเหตุ']}`).join('\n');
-  try { await navigator.clipboard.writeText(txt); toast('คัดลอกแล้ว วางใน Excel/อีเมลได้เลย'); } catch { toast('คัดลอกไม่สำเร็จ'); }
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'รายการสั่งซื้อ');
+  XLSX.writeFile(wb, `รายการสั่งซื้อ_${stamp()}.xlsx`);
 });
 
 // ------------------------------------------------------------ export all
@@ -706,7 +1061,8 @@ $('#btnExportAll').addEventListener('click', () => {
 
 $('#btnReset').addEventListener('click', () => {
   if (!confirm('ล้างไฟล์ที่นำเข้าและรายการที่เลือกทั้งหมด?')) return;
-  state = { files: {}, opt: { ...DEFAULTS }, cart: {}, qtySource: 'auto' };
+  state = { files: {}, opt: { ...DEFAULTS }, cart: {}, qtySource: 'auto', draft: { lines: [], note: '', over: {}, editId: null, keepFiles: [] }, pick: { key: '', month: new Date().getMonth() + 1 } };
+  draftFiles = [];
   save(); recompute();
 });
 
@@ -723,10 +1079,10 @@ function aiContext() {
   const s = summarize(merged.rows);
   const line = r => [r.sku, r.name, r.pc || r.group, r.category, r.balance, r.unit, r.cost,
     r.manual ? r.manual.avg : '', Math.round(r.avgActual * 10) / 10, r.orderStore, r.orderManual, r.orderActual,
-    state.cart[r.sku]?.qty ?? '', r.flags.join('; ')].join('\t');
+    draftLineOf(r.sku)?.qty ?? '', r.flags.join('; ')].join('\t');
   const head = 'sku\tname\tpc\tcategory\tbalance\tunit\tunit_cost\tavg_manual\tavg_actual\torder_store\torder_minmax_old\torder_actual\tselected_qty\tflags';
   const interesting = merged.rows
-    .filter(r => r.flags.length || r.orderStore || r.orderActual || r.orderManual || state.cart[r.sku])
+    .filter(r => r.flags.length || r.orderStore || r.orderActual || r.orderManual || draftHas(r.sku))
     .sort((a, b) => Math.max(b.orderStore, b.orderActual, b.orderManual) * b.cost - Math.max(a.orderStore, a.orderActual, a.orderManual) * a.cost)
     .slice(0, 250);
   return `เดือนที่มีข้อมูลการใช้: ${merged.months.map(monthLabel).join(', ')}
@@ -792,18 +1148,34 @@ const errMsg = e => (e && e.network) ? 'เชื่อมต่อ Apps Script 
 
 function applySession(info) {
   // identity used to match Master PC owners / managers: email when set, else the ID (same rule as the server)
+  const prevId = me && me.id;
   me = info && info.id ? { ...info, email: String(info.email || info.id).toLowerCase() } : info;
-  members = null; masterPc = []; requests = []; // never show the previous user's data
+  members = null; masterPc = []; requests = []; appSettings = null; // never show the previous user's data
+  editingReq = null; composing = null; reqFilterSet = false;
   const active = isMember();
+  const admin = isAdmin();
+  // a different person on this browser starts with an empty request
+  if (active && prevId && prevId !== me.id) resetDraft();
+  if (active) { try { const owner = localStorage.getItem(DRAFT_OWNER_KEY); if (owner && owner !== me.id) resetDraft(); localStorage.setItem(DRAFT_OWNER_KEY, me.id); } catch { /* private mode */ } }
   $('#whoami').hidden = !active;
   if (active) {
-    $('#whoami').innerHTML = `<b>${esc(me.name || me.id)}</b> · ${me.role === 'admin' ? 'Admin' : 'User'} (${esc(me.id)})
+    $('#whoami').innerHTML = `<b>${esc(me.name || me.id)}</b> <span class="hint">(${esc(me.id)})</span>
       <button class="link-btn" data-acct="profile">บัญชีของฉัน</button> <button class="link-btn" data-acct="logout">ออกจากระบบ</button>`;
   }
-  $('#tabRequests').hidden = !active;
-  $('#tabAdmin').hidden = !isAdmin();
-  $('#tabBudget').hidden = !active;
-  $('#roundBox').hidden = !isAdmin();
+  // Admin and User see different menus and home pages
+  $('#rolePill').hidden = !active;
+  $('#rolePill').textContent = admin ? 'Admin · ผู้ดูแลระบบ' : 'User · ผู้ใช้งาน';
+  $('#rolePill').className = 'role-pill ' + (admin ? 'admin' : 'user');
+  document.body.dataset.role = active ? (admin ? 'admin' : 'user') : '';
+  document.querySelectorAll('#sidenav [data-role]').forEach(el => {
+    const r = el.dataset.role;
+    el.hidden = !(r === 'all' || (r === 'admin' ? admin : !admin));
+  });
+  document.querySelectorAll('#sidenav [data-admin]').forEach(el => { el.textContent = admin ? el.dataset.admin : el.dataset.user; });
+  const cur = document.querySelector('.tab.active');
+  if (!cur || cur.hidden) { activeTab = 'home'; document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x.dataset.tab === 'home' && !x.hidden)); document.querySelectorAll('.tabpane').forEach(p => (p.hidden = p.id !== 'tab-home')); }
+  $('#roundBox').hidden = !admin;
+  renderDemoBar();
   renderGate();
   const blocked = SERVER && !active;
   $('#sidenav').hidden = blocked;
@@ -812,6 +1184,7 @@ function applySession(info) {
   recompute();
   if (active) {
     loadServerData(); refreshBudget(); loadMasterPc();
+    if (admin) loadSettings();
     loadRequests(true).then(openDeepLink);
   }
 }
@@ -865,12 +1238,19 @@ function renderGate() {
           <button class="btn">สมัคร</button> <button type="button" class="btn ghost" data-gate="login">มีบัญชีแล้ว — เข้าสู่ระบบ</button>
         </form></div>`
     : `<div class="gate"><h2>เข้าสู่ระบบ</h2>
+        ${DEMO ? `<div class="demo-login"><p><b>โหมดทดลอง</b> — เลือกบทบาทเพื่อลองใช้งาน (ข้อมูลตัวอย่าง ไม่กระทบระบบจริง)</p>
+          <div class="demo-roles">
+            <button type="button" class="role-card admin" data-demo="admin"><b>เข้าเป็น Admin</b><span>ตรวจคำขอ · แก้ไข/ลบ · ส่งเมลรายการ + Budget</span></button>
+            <button type="button" class="role-card user" data-demo="user"><b>เข้าเป็น User</b><span>เลือก Budget · ใส่รายการ · แนบใบเสนอราคา · ส่งให้ Admin</span></button>
+          </div>
+          <p class="hint">หรือใส่ ID เอง: admin / user / user2 / head · รหัสผ่าน demo1234</p></div>` : ''}
         <form id="loginForm" class="gate-form">
-          <input name="username" placeholder="ID" autocomplete="username" required autofocus>
+          <input name="username" placeholder="ID" autocomplete="username" required ${DEMO ? '' : 'autofocus'}>
           <input name="password" type="password" placeholder="รหัสผ่าน" autocomplete="current-password" required>
           <button class="btn">เข้าสู่ระบบ</button> <button type="button" class="btn ghost" data-gate="register">สมัครสมาชิก</button>
         </form>
-        <p id="gateErr" class="hint over"></p></div>`;
+        <p id="gateErr" class="hint over"></p>
+        ${!DEMO && !GAS ? '<p class="hint try-demo">อยากลองก่อน? <a href="?demo=1">ทดลองใช้งานด้วยข้อมูลตัวอย่าง</a> (Admin และ User — ไม่กระทบระบบจริง)</p>' : ''}</div>`;
   const f = $('#loginForm') || $('#regForm');
   f.addEventListener('submit', async e => {
     e.preventDefault();
@@ -947,16 +1327,73 @@ document.addEventListener('click', async e => {
   }
 });
 
-// ------------------------------------------------------------ budget (select line + month, show balance)
+// ------------------------------------------------------------ demo / trial mode (web/demo.js)
 
+function renderDemoBar() {
+  $('#demoBar').hidden = !DEMO;
+  document.body.classList.toggle('demo', DEMO);
+  if (!DEMO) return;
+  $('#demoMailCount').textContent = window.DEMO.outbox().length;
+  document.querySelectorAll('#demoBar [data-demo="admin"], #demoBar [data-demo="user"]')
+    .forEach(b => b.classList.toggle('on', !!me && me.id === b.dataset.demo));
+}
+
+async function demoLogin(username) {
+  const acct = window.DEMO.accounts.find(a => a.username === username);
+  if (!acct) return;
+  try { if (token) await gasCall('logout'); } catch { /* already signed out */ }
+  setToken('');
+  try {
+    const res = await gasCall('login', acct.username, acct.password);
+    setToken(res.token);
+    applySession(res.user);
+    toast(`เข้าสู่ระบบเป็น ${acct.name}`);
+  } catch (e) { toast(errMsg(e)); }
+}
+
+function renderOutbox(sel = 0) {
+  const mails = window.DEMO.outbox();
+  $('#demoMailList').innerHTML = mails.length ? mails.map((m, i) => `<li class="${i === sel ? 'sel' : ''}" data-mail="${i}">
+      <b>${esc(m.subject)}</b><span class="hint">ถึง ${esc(m.to)}${m.cc ? ' · สำเนา ' + esc(m.cc) : ''}</span>
+      <span class="hint">${esc(new Date(m.at).toLocaleString('th-TH'))}${m.attachments.length ? ' · 📎 ' + m.attachments.length : ''}</span></li>`).join('')
+    : '<li class="empty-sm">ยังไม่มีอีเมล — ลองส่งคำขอ แล้วให้ Admin กด "ส่งเมล"</li>';
+  const m = mails[sel];
+  $('#demoMailView').innerHTML = m ? `<div class="mail-meta"><div><b>เรื่อง:</b> ${esc(m.subject)}</div><div><b>ถึง:</b> ${esc(m.to)}</div>
+      ${m.cc ? `<div><b>สำเนา:</b> ${esc(m.cc)}</div>` : ''}
+      ${m.attachments.length ? `<div class="mail-att"><b>ไฟล์แนบ:</b> ${m.attachments.map(a => a.data
+        ? `<a href="data:${esc(a.type)};base64,${a.data}" download="${esc(a.name)}">📎 ${esc(a.name)}</a>` : `<span>📎 ${esc(a.name)}</span>`).join(' ')}</div>` : ''}</div>
+    <iframe class="mail-preview" title="อีเมล" sandbox srcdoc="${esc(m.htmlBody)}"></iframe>` : '';
+}
+
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-demo]');
+  if (b && DEMO) {
+    const a = b.dataset.demo;
+    if (a === 'admin' || a === 'user') demoLogin(a);
+    else if (a === 'outbox') { renderOutbox(0); $('#demoOutbox').showModal(); }
+    else if (a === 'close') $('#demoOutbox').close();
+    else if (a === 'reset') {
+      if (!confirm('เริ่มข้อมูลทดลองใหม่?\nคำขอและการแก้ไขในโหมดทดลองจะหายทั้งหมด (ระบบจริงไม่เกี่ยว)')) return;
+      window.DEMO.reset(); setToken('');
+      try { localStorage.removeItem(STORE_KEY); } catch { /* ignore */ }
+      location.reload();
+    } else if (a === 'exit') location.href = location.pathname + '?demo=0';
+    return;
+  }
+  const li = e.target.closest('[data-mail]');
+  if (li) renderOutbox(Number(li.dataset.mail));
+});
+
+// ------------------------------------------------------------ budget options (server: getBudgetOptions)
 
 async function refreshBudget() {
   try { budgetOpts = await gasCall('getBudgetOptions'); }
   catch (e) { budgetOpts = { year: 0, lines: [], reserved: {}, error: errMsg(e) }; }
-  if (activeTab === 'cart') renderSubmitBox();
+  if (activeTab === 'order') renderOrder();
   if (activeTab === 'home') renderHome();
   if (activeTab === 'admin') renderAdmin();
   if (activeTab === 'budget') renderBudget();
+  if (activeTab === 'requests') renderRequests();
 }
 
 function budgetAvail(line, m) {
@@ -964,167 +1401,6 @@ function budgetAvail(line, m) {
   const reserved = (budgetOpts.reserved || {})[line.key + '|' + m] || 0;
   return { plan: mb.plan, actual: mb.actual, reserved, available: mb.plan - mb.actual - reserved };
 }
-
-function renderSubmitBox() {
-  const hint = $('#submitHint'), form = $('#submitForm');
-  if (!SERVER) {
-    hint.textContent = 'ส่งคำขอให้ Admin ได้เฉพาะในเวอร์ชัน Apps Script (เข้าด้วยบัญชี Google ของบริษัท) — เวอร์ชันนี้ใช้ส่งออก .xlsx แทน';
-    form.hidden = true; return;
-  }
-  if (!isMember()) { form.hidden = true; hint.textContent = ''; return; }
-  form.hidden = false;
-  if (!budgetOpts) { hint.textContent = 'กำลังโหลด Budget…'; return; }
-  if (budgetOpts.error) { hint.textContent = 'โหลด Budget ไม่ได้: ' + budgetOpts.error; return; }
-  if (!budgetOpts.lines.length) {
-    hint.textContent = 'ยังไม่มีข้อมูล Budget — ' + (isAdmin() ? 'นำเข้าไฟล์ Budget ที่แท็บ Admin ก่อน' : 'รอ Admin นำเข้าไฟล์ Budget');
-    form.hidden = true; return;
-  }
-  hint.textContent = `เลือก Budget + เดือนของแต่ละรายการ (หรือใช้ Budget ตั้งต้นกับทุกรายการ) · ถ้างบไม่พอ ให้ติ๊กขอ Over Budget พร้อมเหตุผล แล้วส่งให้ Admin ตรวจ (ปีงบ ${budgetOpts.year || '-'})`;
-  if (!$('#cartBody .bcell') && cartTotals().n) renderCart(); // per-item budget pickers need budgetOpts
-  fillBudgetSelect();
-  const ms = $('#monthSel');
-  if (!ms.options.length) {
-    ms.innerHTML = '<option value="">— เลือกเดือน —</option>' +
-      THAI_MONTH_FULL.slice(1).map((n, i) => `<option value="${i + 1}">${n} ${budgetOpts.year || ''}</option>`).join('');
-    ms.value = state.reqMonth || String(new Date().getMonth() + 1);
-  }
-  renderBudgetInfo();
-}
-
-function fillBudgetSelect() {
-  // every word must match somewhere, e.g. "530090 cookies"
-  const words = $('#budgetSearch').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  const sel = $('#budgetSel');
-  const cur = sel.value || state.reqBudget || '';
-  const lines = budgetOpts.lines.filter(l => {
-    const text = (l.label + ' ' + l.expenseGroup).toLowerCase();
-    return words.every(w => text.includes(w));
-  });
-  sel.innerHTML = lines.map(l => `<option value="${esc(l.key)}">${esc(l.label)}</option>`).join('') ||
-    '<option value="" disabled>ไม่พบ Budget ที่ค้นหา</option>';
-  if (lines.some(l => l.key === cur)) sel.value = cur;
-}
-
-/** Budget line + month an item is charged to: its own choice, else the default picker. */
-function effBudget(c) {
-  return { key: c.budgetKey || $('#budgetSel').value || '', month: Number(c.month || $('#monthSel').value) || 0 };
-}
-
-/** Cart grouped by budget line x month: [{ k, key, month, line, amount, n, b, after, over }]. */
-function cartBudgetLines() {
-  const g = new Map();
-  for (const { r, c } of cartRows()) {
-    if (!(c.qty > 0)) continue;
-    const e = effBudget(c), k = e.key + '|' + e.month;
-    if (!g.has(k)) g.set(k, { k, key: e.key, month: e.month, amount: 0, n: 0 });
-    const x = g.get(k); x.amount += c.qty * r.cost; x.n++;
-  }
-  return [...g.values()].map(x => {
-    x.line = budgetOpts && budgetOpts.lines && budgetOpts.lines.find(l => l.key === x.key);
-    if (x.line && x.month) { x.b = budgetAvail(x.line, x.month); x.after = x.b.available - x.amount; x.over = x.after < -0.004; }
-    return x;
-  });
-}
-
-/** Step 2 progress: items → budget + month → send. */
-function updateStepper() {
-  const li = document.querySelectorAll('#cartStepper li');
-  const hasItems = cartTotals().n > 0;
-  const hasBudget = hasItems && !!budgetOpts && cartBudgetLines().every(x => x.line && x.month);
-  const done = [hasItems, hasItems && hasBudget, false];
-  const current = !hasItems ? 0 : !hasBudget ? 1 : 2;
-  li.forEach((el, i) => { el.classList.toggle('done', done[i]); el.classList.toggle('on', i === current); });
-}
-
-function renderBudgetInfo() {
-  updateStepper();
-  state.over = state.over || {};
-  const lines = cartBudgetLines();
-  const total = lines.reduce((a, x) => a + x.amount, 0);
-  if (!lines.length) { $('#budgetInfo').innerHTML = `<div class="row total"><span>ยอดคำขอนี้</span><b>${money(0)}</b></div>`; return; }
-  $('#budgetInfo').innerHTML = lines.map(x => {
-    if (!x.line || !x.month) return `<div class="bline warn"><b>${x.n} รายการยังไม่ได้เลือก Budget / เดือน</b><span class="num">${money(x.amount)}</span></div>`;
-    const ob = state.over[x.k] || {};
-    return `<div class="bline ${x.over ? 'is-over' : ''}">
-      <div class="bline-head"><b>${esc(x.line.label)}</b><span class="hint">เดือน${THAI_MONTH_FULL[x.month]} · ${x.n} รายการ</span></div>
-      <div class="row"><span>งบตาม BG</span><b>${money(x.b.plan)}</b></div>
-      <div class="row"><span>ใช้จริง ${money(x.b.actual)} · คำขออื่น ${money(x.b.reserved)}</span><b>คงเหลือ ${money(x.b.available)}</b></div>
-      <div class="row"><span>คำขอนี้</span><b>${money(x.amount)}</b></div>
-      <div class="row"><span>หลังส่ง</span><b class="${x.over ? 'over' : 'ok'}">${money(x.after)}${x.over ? ' (งบไม่พอ)' : ''}</b></div>
-      ${x.over ? `<label class="over-req"><input type="checkbox" data-over-on="${esc(x.k)}" ${ob.on ? 'checked' : ''}> ขอ Over Budget (เกิน ${money(-x.after)})</label>
-        <input class="over-reason" data-over-reason="${esc(x.k)}" value="${esc(ob.reason || '')}" placeholder="เหตุผลที่ขอเกินงบ (จำเป็น)" ${ob.on ? '' : 'hidden'}>` : ''}
-    </div>`;
-  }).join('') + `<div class="row total"><span>ยอดคำขอนี้ (ไม่รวม VAT)</span><b>${money(total)}</b></div>`;
-}
-
-$('#budgetInfo').addEventListener('change', e => {
-  const k = e.target.dataset.overOn;
-  if (k == null) return;
-  state.over = state.over || {};
-  state.over[k] = { ...(state.over[k] || {}), on: e.target.checked };
-  save(); renderBudgetInfo();
-  if (e.target.checked) { const inp = $('#budgetInfo').querySelector(`[data-over-reason="${CSS.escape(k)}"]`); if (inp) inp.focus(); }
-});
-$('#budgetInfo').addEventListener('input', e => {
-  const k = e.target.dataset.overReason;
-  if (k == null) return;
-  state.over = state.over || {};
-  state.over[k] = { ...(state.over[k] || {}), on: true, reason: e.target.value };
-  save();
-});
-
-$('#budgetSearch').addEventListener('input', () => { if (budgetOpts) { fillBudgetSelect(); renderBudgetInfo(); } });
-$('#budgetSel').addEventListener('change', () => { state.reqBudget = $('#budgetSel').value; save(); renderBudgetInfo(); });
-$('#monthSel').addEventListener('change', () => { state.reqMonth = $('#monthSel').value; save(); renderBudgetInfo(); });
-$('#btnApplyBudget').addEventListener('click', () => {
-  const key = $('#budgetSel').value, month = Number($('#monthSel').value);
-  if (!key || !month) return toast('เลือก Budget และเดือนก่อน');
-  Object.values(state.cart).forEach(c => { c.budgetKey = key; c.month = month; });
-  save(); renderCart(); renderBudgetInfo();
-  toast('ใช้ Budget + เดือนนี้กับทุกรายการแล้ว');
-});
-
-$('#btnSubmitReq').addEventListener('click', async () => {
-  const items = cartRows().filter(x => x.c.qty > 0);
-  if (!items.length) return toast('ยังไม่ได้เลือกรายการ หรือจำนวนเป็น 0');
-  const lines = cartBudgetLines();
-  if (lines.some(x => !x.line || !x.month)) return toast('ยังมีรายการที่ไม่ได้เลือก Budget / เดือน');
-  state.over = state.over || {};
-  const over = lines.filter(x => x.over);
-  const notAsked = over.filter(x => !(state.over[x.k] && state.over[x.k].on && String(state.over[x.k].reason || '').trim()));
-  if (notAsked.length) {
-    renderBudgetInfo();
-    return toast(`งบไม่พอ ${notAsked.length} Budget — ติ๊ก "ขอ Over Budget" และใส่เหตุผล หรือเปลี่ยน Budget / เดือน / จำนวน`);
-  }
-  const total = lines.reduce((a, x) => a + x.amount, 0);
-  if (!confirm(`ส่งคำขอ ${items.length} รายการ รวม ${money(total)} (ไม่รวม VAT)\n` +
-    lines.map(x => `• ${x.line.label} · ${THAI_MONTH_FULL[x.month]} · ${money(x.amount)}${x.over ? ' (ขอ Over Budget)' : ''}`).join('\n') +
-    '\n\nส่งให้ Admin ตรวจ แล้ว Admin จะส่งอีเมลขออนุมัติผู้บริหาร — ยืนยัน?')) return;
-  const overReasons = {};
-  over.forEach(x => { overReasons[x.k] = String(state.over[x.k].reason).trim(); });
-  $('#btnSubmitReq').disabled = true;
-  try {
-    const res = await gasCall('submitOrderRequest', {
-      note: $('#reqNote').value, overReasons,
-      items: items.map(({ r, c }) => {
-        const e = effBudget(c);
-        return { sku: r.sku, name: r.name, pc: r.pc || r.group, pcName: r.pcName, unit: r.unit, qty: c.qty, unitCost: r.cost,
-          note: c.note, budgetKey: e.key, month: e.month, storeBalance: r.balance };
-      })
-    });
-    state.cart = {}; state.over = {}; $('#reqNote').value = ''; save();
-    toast(`ส่งคำขอ ${res.id} แล้ว${res.overBudget ? ' (มีขอ Over Budget)' : ''} — Admin ได้รับอีเมลแจ้งแล้ว`);
-    renderCards(); await refreshBudget();
-    $('#reqFilter').value = '';
-    focusReq = res.id;
-    await loadRequests();
-    goTab('requests');
-  } catch (e) {
-    toast('ส่งไม่สำเร็จ: ' + errMsg(e));
-  } finally {
-    $('#btnSubmitReq').disabled = false;
-  }
-});
 
 // Admin: budget upload (Admin tab button, or drop the budget file anywhere)
 async function uploadBudget(rows, fileName) {
@@ -1154,32 +1430,38 @@ $('#budgetFile').addEventListener('change', async e => {
   }
 });
 
-// ------------------------------------------------------------ requests — workflow steps 5–10 (server: src/Requests.js)
+// ------------------------------------------------------------ requests (server: src/Requests.js, Approval.js, Quotes.js)
+//   User:  คำขอของฉัน — track, call back to edit (รอผู้ขอแก้ไข) and resubmit, see quotations
+//   Admin: ตรวจคำขอ — check items + quotations, fix / send back / delete, send the order list + budget email
+//          (with the Excel file + quotations attached), record the approval, Purchasing, PR/PO, received
 
 const ST = {
   WAIT_PC: 'รอ PC ยืนยัน', PC_REJECTED: 'PC ปฏิเสธ', PENDING: 'รอ Admin ตรวจ', APPROVAL_WAIT: 'รอผู้บริหารอนุมัติ',
   OVER_WAIT: 'รอหัวหน้าอนุมัติเกินงบ', APPROVED: 'อนุมัติ', REJECTED: 'ไม่อนุมัติ', CANCELLED: 'ยกเลิก',
-  PO: 'ออก PR/PO แล้ว', RECEIVED: 'รับของแล้ว'
+  PO: 'ออก PR/PO แล้ว', RECEIVED: 'รับของแล้ว', EDIT: 'รอผู้ขอแก้ไข'
 };
 const STATUS_CLASS = {
   [ST.WAIT_PC]: 'st-pending', [ST.PENDING]: 'st-pending', [ST.APPROVAL_WAIT]: 'st-pending', [ST.OVER_WAIT]: 'st-pending',
-  [ST.APPROVED]: 'st-approved', [ST.PO]: 'st-approved', [ST.RECEIVED]: 'st-approved',
+  [ST.EDIT]: 'st-edit', [ST.APPROVED]: 'st-approved', [ST.PO]: 'st-approved', [ST.RECEIVED]: 'st-approved',
   [ST.REJECTED]: 'st-rejected', [ST.PC_REJECTED]: 'st-cancelled', [ST.CANCELLED]: 'st-cancelled'
 };
 const FLOW = [ST.PENDING, ST.APPROVAL_WAIT, ST.APPROVED, ST.PO, ST.RECEIVED];
-const FLOW_LABEL = { [ST.PENDING]: 'Admin ตรวจ', [ST.APPROVAL_WAIT]: 'ผู้บริหารอนุมัติ', [ST.APPROVED]: 'อนุมัติ', [ST.PO]: 'PR/PO', [ST.RECEIVED]: 'รับของ' };
-let focusReq = null;       // request id to scroll to (deep link)
-let editingReq = null;     // request id whose confirm form is open
-let composing = null;      // { id, kind, draft } — approval / purchasing email being edited
+const FLOW_LABEL = { [ST.PENDING]: 'Admin ตรวจ', [ST.APPROVAL_WAIT]: 'ส่งเมล / รออนุมัติ', [ST.APPROVED]: 'อนุมัติ', [ST.PO]: 'PR/PO', [ST.RECEIVED]: 'รับของ' };
+let focusReq = null;       // request id to scroll to (deep link / just sent)
+let editingReq = null;     // { id, mode: 'pc' | 'admin' } whose inline form is open
+let composing = null;      // { id, kind, draft } — email being prepared
 let masterPc = [];
+let reqFilterSet = false;  // first visit picks a sensible filter per role
 
 const mine = r => r.assigned.includes(me.email);
+const isRequester = r => String(r.requester_email || '').toLowerCase() === me.email;
 const isManagerOf = r => String(r.manager_email || '').toLowerCase() === me.email;
 const isApproverOf = r => (r.approvers || []).includes(me.email);
 
 /** Requests that are waiting on me right now. */
 function needsMe(r) {
   if (r.status === ST.WAIT_PC) return mine(r) || (isAdmin() && !r.assigned.length);
+  if (r.status === ST.EDIT) return isRequester(r);
   if (r.status === ST.OVER_WAIT) return isManagerOf(r) || isAdmin();
   if (r.status === ST.APPROVAL_WAIT) return isApproverOf(r) || isAdmin();
   if (isAdmin()) return [ST.PENDING, ST.APPROVED, ST.PO].includes(r.status);
@@ -1197,73 +1479,89 @@ async function loadRequests(badgeOnly = false) {
 
 function updateReqBadge() {
   const n = requests.filter(needsMe).length;
-  $('#reqBadge').hidden = !n;
-  $('#reqBadge').textContent = n;
+  document.querySelectorAll('.reqBadge').forEach(b => { b.hidden = !n; b.textContent = n; });
   if (activeTab === 'home') renderHome();
 }
 
-// ------------------------------------------------------------ home: what to do next
+// ------------------------------------------------------------ home: different for Admin and User
 
 function renderHome() {
   const admin = isAdmin();
   const hasData = merged.rows.length > 0;
-  const { n: cartN, v: cartV } = cartTotals();
-  const todo = SERVER && isMember() ? requests.filter(needsMe) : [];
+  const { n: draftN, v: draftV } = draftTotals();
+  const todo = isMember() ? requests.filter(needsMe) : [];
   const hour = new Date().getHours();
   const hello = hour < 12 ? 'สวัสดีตอนเช้า' : hour < 17 ? 'สวัสดีตอนบ่าย' : 'สวัสดีตอนเย็น';
   $('#homeTitle').textContent = me && me.name ? `${hello}, ${me.name}` : 'หน้าแรก';
   $('#homeSub').textContent = new Date().toLocaleDateString('th-TH', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) +
-    (me && me.role ? ` · ${admin ? 'Admin' : 'User'}` : '');
+    (me && me.role ? ` · ${admin ? 'ผู้ดูแลระบบ (Admin)' : 'ผู้ใช้งาน (User)'}` : '');
 
-  // Setup gaps that block the workflow
   const alerts = [];
-  if (!hasData) alerts.push(admin || !SERVER
-    ? ['ยังไม่มีข้อมูล Store — นำเข้าไฟล์ 4 ไฟล์ก่อนเริ่มใช้งาน', 'data', 'ไปนำเข้าไฟล์']
-    : ['ยังไม่มีข้อมูล Store — รอ Admin นำเข้าไฟล์', '', '']);
-  if (SERVER && isMember() && budgetOpts && !budgetOpts.error && !budgetOpts.lines.length) alerts.push(admin
-    ? ['ยังไม่มีข้อมูล Budget — ส่งคำขอไม่ได้จนกว่าจะนำเข้า', 'admin', 'นำเข้า Budget']
-    : ['ยังไม่มีข้อมูล Budget — รอ Admin นำเข้า', '', '']);
-  if (admin && masterPc.length === 0 && hasData) alerts.push(['ยังไม่ได้ตั้งผู้รับผิดชอบ PC (Master PC) — ระบบจะส่งอีเมลให้ PC ไม่ได้', 'admin', 'ตั้งค่า']);
+  if (admin && !hasData) alerts.push(['ยังไม่มีข้อมูล Store — นำเข้าไฟล์ 4 ไฟล์ก่อน (รายการแนะนำ / ยอดคงเหลือ)', 'data', 'ไปนำเข้าไฟล์']);
+  if (isMember() && budgetOpts && !budgetOpts.error && !budgetOpts.lines.length) alerts.push(admin
+    ? ['ยังไม่มีข้อมูล Budget — User ยังส่งคำขอไม่ได้', 'admin', 'นำเข้า Budget'] : ['ยังไม่มีข้อมูล Budget — รอ Admin นำเข้า', '', '']);
+  if (!admin && state.draft.editId) alerts.push([`กำลังแก้ไขคำขอ ${state.draft.editId} — ยังไม่ได้ส่งใหม่`, 'order', 'ทำต่อ']);
   $('#homeAlerts').innerHTML = alerts.map(([msg, tab, label]) =>
     `<div class="alert-row"><span>${esc(msg)}</span>${tab ? `<button class="btn sm" data-go="${tab}">${esc(label)}</button>` : ''}</div>`).join('');
 
-  // Steps with live status
-  let stepNo = 0; // numbered in display order (admins get an extra first step)
-  const step = (_, title, desc, status, tab, cta, done) => `<li class="${done ? 'done' : ''}">
-      <span class="step-no">${++stepNo && done ? '✓' : stepNo}</span>
-      <div class="step-body"><b>${title}</b><div class="hint">${desc}</div>${status ? `<div class="step-status">${status}</div>` : ''}</div>
-      ${tab ? `<button class="btn sm ${done ? 'ghost' : ''}" data-go="${tab}">${cta}</button>` : ''}</li>`;
-  const s = hasData ? summarize(merged.rows) : null;
-  const steps = [];
-  if (admin || !SERVER) steps.push(step(0, 'อัปเดตข้อมูล Store', 'นำเข้าไฟล์คงเหลือ / การใช้ / จุดสั่งซื้อ / MIN-MAX', hasData ? `มีข้อมูล ${fmt(merged.rows.length)} รายการ · ${merged.months.length} เดือน` : '', 'data', 'ข้อมูล Store', hasData));
-  steps.push(step(1, 'เลือกรายการที่จะสั่ง', 'ระบบแนะนำจำนวนจากยอดใช้จริง ติ๊กเลือกและแก้จำนวนได้',
-    s ? `แนะนำให้สั่ง ${fmt(merged.rows.filter(r => suggestion(r).qty > 0).length)} รายการ (ยอดแนะนำจาก: ${esc($("#qtySource").selectedOptions[0].text)}) · เลือกแล้ว ${fmt(cartN)}` : '', 'compare', 'เลือกรายการ', cartN > 0));
-  steps.push(step(2, admin ? 'ตรวจ & ส่ง' : 'ตรวจ & ส่งคำขอ',
-    admin ? 'ส่งให้ PC ยืนยันทางอีเมล หรือส่งคำขอเองพร้อม Budget + เดือน' : 'เลือก Budget และเดือนที่จะใช้ของ แล้วส่งให้ Admin',
-    cartN ? `${fmt(cartN)} รายการ · ${money(cartV)}` : '', 'cart', 'ตรวจ & ส่ง', false));
-  if (SERVER) steps.push(step(3, admin ? 'อนุมัติ → PR/PO → รับของ' : 'ติดตามสถานะ',
-    admin ? 'ตรวจคำขอ → ส่งอีเมลขออนุมัติผู้บริหาร → บันทึกผล → แจ้งจัดซื้อ / PR/PO → รับของ' : 'ดูว่าคำขออยู่ขั้นไหน · ยืนยันรายการที่ Admin ส่งมาให้',
-    todo.length ? `<span class="over">รอคุณ ${todo.length} รายการ</span>` : '', 'requests', 'ติดตามคำขอ', false));
-  $('#homeSteps').innerHTML = steps.join('');
+  const count = (sts, fn) => requests.filter(r => sts.includes(r.status) && (!fn || fn(r)));
+  const kpi = (label, list, cls, filter) => `<button class="kpi ${cls || ''}" data-kpi="${esc(filter || '')}">
+    <span class="kpi-k">${esc(label)}</span><span class="kpi-v">${list.length}</span><span class="kpi-s">${money(list.reduce((a, r) => a + (Number(r.total) || 0), 0))}</span></button>`;
+  const myReq = r => isRequester(r);
+  $('#homeKpis').innerHTML = admin
+    ? kpi('รอ Admin ตรวจ', count([ST.PENDING]), 'warn', ST.PENDING) + kpi('รอผู้บริหารอนุมัติ', count([ST.APPROVAL_WAIT]), '', ST.APPROVAL_WAIT) +
+      kpi('อนุมัติแล้ว รอ PR/PO', count([ST.APPROVED]), 'good', ST.APPROVED) + kpi('ส่งกลับให้แก้ไข', count([ST.EDIT]), '', ST.EDIT)
+    : kpi('ต้องแก้ไข', count([ST.EDIT], myReq), 'warn', ST.EDIT) + kpi('รอ Admin ตรวจ', count([ST.PENDING], myReq), '', ST.PENDING) +
+      kpi('รออนุมัติ', count([ST.APPROVAL_WAIT], myReq), '', ST.APPROVAL_WAIT) + kpi('อนุมัติ / สั่งแล้ว', count([ST.APPROVED, ST.PO, ST.RECEIVED], myReq), 'good', ST.APPROVED);
 
-  // Work waiting on me
+  const card = (tab, title, desc, extra, primary) => `<button class="action-card ${primary ? 'primary' : ''}" data-go="${tab}">
+    <b>${title}</b><span>${desc}</span>${extra ? `<span class="ac-extra">${extra}</span>` : ''}</button>`;
+  $('#homeActions').innerHTML = admin
+    ? card('requests', 'ตรวจคำขอสั่งซื้อ', 'ตรวจรายการ + ใบเสนอราคา แก้ไข/ส่งกลับ แล้วส่งเมลรายการ + Budget', todo.length ? `รอคุณ ${todo.length} รายการ` : '', true) +
+      card('budget', 'งบประมาณ', 'ทุกรายการ Budget รายเดือน ใช้แล้ว / คงเหลือ') +
+      card('data', 'ข้อมูล Store', hasData ? `${fmt(merged.rows.length)} รายการ · ${merged.months.length} เดือน` : 'ยังไม่มีข้อมูล') +
+      card('admin', 'สมาชิก & ตั้งค่า', 'สมาชิก · Budget · อีเมลส่งรายการ · Master PC')
+    : card('order', 'สั่งซื้อตาม Budget', 'เลือก Budget + เดือน แล้วใส่รายการที่จะสั่ง', draftN ? `ในคำขอ ${draftN} รายการ · ${money(draftV)}` : '', true) +
+      card('requests', 'คำขอของฉัน', 'ติดตามสถานะ · เรียกกลับมาแก้ไขแล้วส่งใหม่', todo.length ? `ต้องแก้ไข ${todo.length} รายการ` : '') +
+      card('budget', 'ตรวจสอบงบประมาณ', 'ดูงบแต่ละรายการ รายเดือน ใช้แล้ว / เหลือ') +
+      card('compare', 'รายการแนะนำจาก Store', hasData ? 'ของที่ควรสั่งตามยอดใช้จริง' : 'รอ Admin นำเข้าข้อมูล Store');
+
+  const step = (n, title, desc) => `<li><span class="step-no">${n}</span><div class="step-body"><b>${title}</b><div class="hint">${desc}</div></div></li>`;
+  $('#homeFlowTitle').textContent = admin ? 'ขั้นตอนของ Admin' : 'ขั้นตอนการสั่งซื้อ';
+  $('#homeSteps').innerHTML = admin
+    ? step(1, 'ตรวจรายการสั่งซื้อ + ใบเสนอราคา', 'เปิดคำขอที่ "รอ Admin ตรวจ" ดูรายการ งบ และไฟล์แนบ') +
+      step(2, 'แก้ไข / ส่งกลับ / ลบ ถ้าข้อมูลผิด', 'แก้จำนวน ราคา Budget เดือน หรือส่งกลับให้ผู้ขอแก้') +
+      step(3, 'ส่งเมลรายการสั่งซื้อ + Budget', `ถึง ${esc((appSettings && appSettings.approval_to) || 'thanakorn@planbmedia.co.th')} แนบไฟล์ Excel + ใบเสนอราคา`) +
+      step(4, 'บันทึกผลอนุมัติ → แจ้งจัดซื้อ → PR/PO → รับของ', 'เมื่อได้รับ "Approved"')
+    : step(1, 'ตรวจสอบงบประมาณ', 'ดูว่า Budget ไหน เดือนไหนยังเหลือ') +
+      step(2, 'เลือก Budget + เดือน แล้วใส่รายการ', 'ค้นหาสินค้าใน Store หรือเพิ่มรายการใหม่ · แนบใบเสนอราคาได้') +
+      step(3, 'กดส่งให้ Admin', 'งบไม่พอ → ติ๊ก "ขอ Over Budget" พร้อมเหตุผล') +
+      step(4, 'ติดตาม / แก้ไขแล้วส่งใหม่', 'เรียกคำขอกลับมาแก้ได้ก่อน Admin ส่งเมล');
+
+  $('#homeTodoTitle').firstChild.textContent = admin ? 'งานที่รอคุณ ' : 'คำขอล่าสุดของฉัน ';
   $('#homeTodoCount').hidden = !todo.length;
   $('#homeTodoCount').textContent = todo.length;
-  $('#homeTodo').innerHTML = !SERVER ? '<p class="hint">เข้าสู่ระบบเพื่อดูงานที่รอคุณ</p>'
-    : !todo.length ? '<div class="empty-sm">ไม่มีงานค้าง 🎉</div>'
-    : `<ul class="todo-list">${todo.slice(0, 6).map(r => `<li data-open-req="${esc(r.request_id)}">
+  const list = admin ? todo : requests.filter(isRequester).slice(0, 6);
+  $('#homeTodo').innerHTML = !list.length ? `<div class="empty-sm">${admin ? 'ไม่มีงานค้าง 🎉' : 'ยังไม่มีคำขอ — เริ่มที่ "สั่งซื้อตาม Budget"'}</div>`
+    : `<ul class="todo-list">${list.slice(0, 6).map(r => `<li data-open-req="${esc(r.request_id)}">
         <span class="tag ${STATUS_CLASS[r.status] || ''}">${esc(r.status)}</span>
-        <span class="todo-main"><b>${esc(r.request_id)}</b> ${esc(r.pc_code || '')} · ${esc(r.requester_name || '')}</span>
+        <span class="todo-main"><b>${esc(r.request_id)}</b> ${esc(admin ? (r.requester_name || '') : (r.budget_months || ''))}${r.files && r.files.length ? ' 📎' : ''}</span>
         <span class="num">${money(r.total)}</span></li>`).join('')}</ul>
-      ${todo.length > 6 ? `<button class="btn sm ghost" data-go="requests">ดูทั้งหมด ${todo.length} รายการ</button>` : ''}`;
+      ${list.length > 6 ? `<button class="btn sm ghost" data-go="requests">ดูทั้งหมด ${list.length} รายการ</button>` : ''}`;
+
+  $('#summary').hidden = !admin || !hasData;
 }
 
 document.addEventListener('click', e => {
   const go = e.target.closest('[data-go]');
-  if (go) { if (go.dataset.go === 'requests') $('#reqFilter').value = 'todo'; goTab(go.dataset.go); return; }
+  if (go) { if (go.dataset.go === 'requests') { $('#reqFilter').value = 'todo'; reqFilterSet = true; } goTab(go.dataset.go); return; }
+  const k = e.target.closest('[data-kpi]');
+  if (k) { $('#reqFilter').value = k.dataset.kpi; reqFilterSet = true; goTab('requests'); return; }
   const open = e.target.closest('[data-open-req]');
-  if (open) { $('#reqFilter').value = ''; focusReq = open.dataset.openReq; goTab('requests'); }
+  if (open) { $('#reqFilter').value = ''; reqFilterSet = true; focusReq = open.dataset.openReq; goTab('requests'); }
 });
+
+// ------------------------------------------------------------ request list + cards
 
 /**
  * A request grouped by budget line x month, with what is still free for that
@@ -1281,7 +1579,7 @@ function reqBudgetLines(r) {
   }
   const holds = [ST.PENDING, ST.APPROVAL_WAIT, ST.OVER_WAIT, ST.APPROVED, ST.PO, ST.RECEIVED].includes(r.status);
   return [...g.values()].map(x => {
-    const line = budgetOpts && budgetOpts.lines && budgetOpts.lines.find(l => l.key === x.key);
+    const line = budgetLine(x.key);
     if (line) {
       const b = budgetAvail(line, x.month);
       x.label = line.label; x.plan = b.plan; x.avail = b.available + (holds ? x.amount : 0);
@@ -1292,16 +1590,20 @@ function reqBudgetLines(r) {
 }
 
 function renderRequests() {
+  const admin = isAdmin();
+  $('#reqTitle').textContent = admin ? 'ตรวจคำขอสั่งซื้อ' : 'คำขอของฉัน';
+  if (!reqFilterSet) { $('#reqFilter').value = admin ? 'todo' : ''; reqFilterSet = true; }
   const f = $('#reqFilter').value;
-  const list = requests.filter(r => !f || (f === 'todo' ? needsMe(r) : r.status === f));
-  // Dashboard strip: count + value per status
+  const words = $('#reqSearch').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const text = r => [r.request_id, r.requester_name, r.requester_email, r.note, r.budget_label, ...r.items.map(i => i.name + ' ' + i.sku)].join(' ').toLowerCase();
+  const list = requests.filter(r => (!f || (f === 'todo' ? needsMe(r) : r.status === f)) && words.every(w => text(r).includes(w)));
   const by = {};
   for (const r of requests) { by[r.status] = by[r.status] || { n: 0, v: 0 }; by[r.status].n++; by[r.status].v += Number(r.total) || 0; }
   $('#reqDash').innerHTML = Object.values(ST).filter(s => by[s]).map(s =>
-    `<button class="dash-chip ${STATUS_CLASS[s]}" data-filter="${esc(s)}"><b>${by[s].n}</b> ${esc(s)}<span>${money(by[s].v)}</span></button>`).join('');
-  $('#reqInfo').textContent = `${list.length} คำขอ${isAdmin() ? '' : ' ที่เกี่ยวกับฉัน'}`;
+    `<button class="dash-chip ${STATUS_CLASS[s]} ${f === s ? 'sel' : ''}" data-filter="${esc(s)}"><b>${by[s].n}</b> ${esc(s)}<span>${money(by[s].v)}</span></button>`).join('');
+  $('#reqInfo').textContent = `${list.length} คำขอ${admin ? '' : ' ของฉัน / ที่เกี่ยวกับฉัน'}`;
   if (!list.length) {
-    $('#reqList').innerHTML = `<div class="empty">${f === 'todo' ? 'ไม่มีงานที่รอคุณ 🎉' : 'ไม่มีคำขอ'}</div>`;
+    $('#reqList').innerHTML = `<div class="empty">${f === 'todo' ? 'ไม่มีงานที่รอคุณ 🎉' : 'ไม่มีคำขอ'}${!admin ? '<br><button class="btn sm" data-go="order">สั่งซื้อตาม Budget</button>' : ''}</div>`;
     return;
   }
   $('#reqList').innerHTML = list.map(renderReqCard).join('');
@@ -1310,83 +1612,186 @@ function renderRequests() {
     if (el) {
       el.classList.add('focus'); el.scrollIntoView({ block: 'center' });
       const r = requests.find(x => x.request_id === focusReq);
-      if (r && r.status === ST.WAIT_PC && (mine(r) || isAdmin()) && editingReq !== focusReq) { editingReq = focusReq; renderRequests(); }
+      if (r && r.status === ST.WAIT_PC && (mine(r) || admin) && !editingReq) { editingReq = { id: focusReq, mode: 'pc' }; focusReq = null; renderRequests(); return; }
     }
     focusReq = null;
   }
 }
 
+function fileChips(r) {
+  if (!r.files || !r.files.length) return '';
+  return `<div class="req-files"><span class="hint">ใบเสนอราคา:</span> ${r.files.map(f =>
+    `<button class="file-chip" data-file="${esc(f.id)}" title="เปิดดู">📎 ${esc(f.name)} <span class="hint">${kb(f.size)}</span></button>`).join('')}</div>`;
+}
+
 function renderReqCard(r) {
+  const admin = isAdmin();
   const step = FLOW.indexOf(r.status === ST.OVER_WAIT ? ST.PENDING : r.status);
   const blines = reqBudgetLines(r);
   const closed = [ST.REJECTED, ST.CANCELLED, ST.PC_REJECTED].includes(r.status);
   const overAny = !closed && (r.over_budget || blines.some(x => x.over || x.overNow));
   const who = r.source === 'round' ? `ส่งให้ ${esc(r.pc_code)} ${esc(r.pc_name)} · ผู้รับผิดชอบ ${esc(r.assigned.join(', ') || '— ยังไม่ได้ตั้งใน Master PC')}`
-    : `ขอโดย ${esc(r.requester_name || r.requester_email)} · PC ${esc(r.pc_code)}`;
+    : `ขอโดย <b>${esc(r.requester_name || r.requester_email)}</b>${r.pc_code ? ' · PC ' + esc(r.pc_code) : ''}`;
+  const B = (act, label, cls = 'ghost') => `<button class="btn sm ${cls}" data-act="${act}">${label}</button>`;
   const acts = [];
-  if (r.status === ST.WAIT_PC && (mine(r) || isAdmin())) acts.push('<button class="btn sm" data-act="edit">ยืนยัน / แก้จำนวน</button>', '<button class="btn sm ghost" data-act="pcreject">ไม่สั่งรอบนี้</button>');
-  if (r.status === ST.PENDING && isAdmin()) acts.push('<button class="btn sm" data-act="compose">ตรวจแล้ว → ส่งอีเมลขออนุมัติผู้บริหาร</button>', '<button class="btn sm ghost" data-act="reject">ไม่อนุมัติ</button>');
-  if (r.status === ST.APPROVAL_WAIT && (isAdmin() || isApproverOf(r))) {
-    acts.push(`<button class="btn sm" data-act="approvedok">${isAdmin() && !isApproverOf(r) ? 'บันทึก: ผู้บริหารอนุมัติแล้ว' : 'อนุมัติ'}</button>`,
-      `<button class="btn sm ghost" data-act="approvedno">${isAdmin() && !isApproverOf(r) ? 'บันทึก: ผู้บริหารไม่อนุมัติ' : 'ไม่อนุมัติ'}</button>`);
-    if (isAdmin()) acts.push('<button class="btn sm ghost" data-act="compose">ส่งอีเมลขออนุมัติอีกครั้ง</button>');
+  // requester
+  if (isRequester(r)) {
+    if (r.status === ST.EDIT || r.status === ST.REJECTED) acts.push(B('recall', 'แก้ไขแล้วส่งใหม่', ''));
+    if (r.status === ST.PENDING) acts.push(B('recall', 'เรียกกลับมาแก้ไข'));
   }
-  if (r.status === ST.OVER_WAIT && (isManagerOf(r) || isAdmin())) acts.push('<button class="btn sm" data-act="mgrok">หัวหน้าอนุมัติเกินงบ</button>', '<button class="btn sm ghost" data-act="mgrno">หัวหน้าไม่อนุมัติ</button>');
-  if ([ST.APPROVED, ST.PO].includes(r.status) && isAdmin()) acts.push(`<button class="btn sm ${r.purchasing_sent_at ? 'ghost' : ''}" data-act="purchasing">${r.purchasing_sent_at ? 'ส่งแจ้งฝ่ายจัดซื้ออีกครั้ง' : 'ส่งแจ้งฝ่ายจัดซื้อ'}</button>`);
-  if (r.status === ST.APPROVED && isAdmin()) acts.push('<button class="btn sm" data-act="po">ออก PR/PO</button>');
-  if (r.status === ST.PO && isAdmin()) acts.push('<button class="btn sm" data-act="received">รับของเข้าแล้ว</button>');
-  if ([ST.WAIT_PC, ST.PENDING, ST.OVER_WAIT].includes(r.status) && (r.requester_email === me.email || isAdmin())) acts.push('<button class="btn sm ghost" data-act="cancel">ยกเลิกคำขอ</button>');
+  if (r.status === ST.WAIT_PC && (mine(r) || admin)) acts.push(B('edit', 'ยืนยัน / แก้จำนวน', ''), B('pcreject', 'ไม่สั่งรอบนี้'));
+  // admin
+  if (admin) {
+    if (r.status === ST.PENDING) acts.push(B('compose', 'ตรวจแล้ว → ส่งเมลรายการสั่งซื้อ + Budget', ''));
+    if (r.status === ST.APPROVAL_WAIT) acts.push(B('approvedok', isApproverOf(r) ? 'อนุมัติ' : 'บันทึก: ได้รับอนุมัติแล้ว', ''), B('approvedno', isApproverOf(r) ? 'ไม่อนุมัติ' : 'บันทึก: ไม่อนุมัติ'), B('compose', 'ส่งเมลอีกครั้ง'));
+    if ([ST.PENDING, ST.APPROVAL_WAIT, ST.EDIT].includes(r.status)) acts.push(B('aedit', 'แก้ไขข้อมูล'));
+    if ([ST.PENDING, ST.APPROVAL_WAIT].includes(r.status)) acts.push(B('return', 'ส่งกลับให้ผู้ขอแก้ไข'), B('reject', 'ไม่อนุมัติ'));
+    if ([ST.APPROVED, ST.PO].includes(r.status)) acts.push(B('purchasing', r.purchasing_sent_at ? 'ส่งแจ้งฝ่ายจัดซื้ออีกครั้ง' : 'ส่งแจ้งฝ่ายจัดซื้อ', r.purchasing_sent_at ? 'ghost' : ''));
+    if (r.status === ST.APPROVED) acts.push(B('po', 'ออก PR/PO', ''));
+    if (r.status === ST.PO) acts.push(B('received', 'รับของเข้าแล้ว', ''));
+  } else if (r.status === ST.APPROVAL_WAIT && isApproverOf(r)) {
+    acts.push(B('approvedok', 'อนุมัติ', ''), B('approvedno', 'ไม่อนุมัติ'));
+  }
+  if (r.status === ST.OVER_WAIT && (isManagerOf(r) || admin)) acts.push(B('mgrok', 'หัวหน้าอนุมัติเกินงบ', ''), B('mgrno', 'หัวหน้าไม่อนุมัติ'));
+  if ([ST.WAIT_PC, ST.PENDING, ST.OVER_WAIT, ST.EDIT].includes(r.status) && (isRequester(r) || admin)) acts.push(B('cancel', 'ยกเลิกคำขอ'));
+  if (admin && ![ST.PO, ST.RECEIVED].includes(r.status)) acts.push(B('delete', 'ลบ', 'ghost danger'));
 
   const budgetHtml = blines.length ? `<ul class="req-budget">${blines.map(x => `<li class="${x.over || x.overNow ? 'is-over' : ''}">
-      <span>${esc(x.label)} · ${esc(THAI_MONTH_FULL[x.month] || '')}</span>
+      <span>${esc(x.label)} · <b>${esc(THAI_MONTH_FULL[x.month] || '')}</b></span>
       <span class="num">${money(x.amount)}${x.avail != null ? ` <span class="hint">/ เหลือ ${money(x.avail)}</span>` : ''}</span>
       ${x.over ? `<div class="over">ขอ Over Budget${x.reason ? ': ' + esc(x.reason) : ''}</div>` : x.overNow && !closed ? '<div class="over">งบไม่พอแล้ว</div>' : ''}
     </li>`).join('')}</ul>` : '';
+  const editing = editingReq && editingReq.id === r.request_id;
+  const isComposing = composing && composing.id === r.request_id;
 
   return `<div class="req-card ${needsMe(r) ? 'todo' : ''}" data-id="${esc(r.request_id)}">
     <div class="req-head">
       <span class="id">${esc(r.request_id)}</span>
       <span class="tag ${STATUS_CLASS[r.status] || ''}">${esc(r.status)}</span>
       ${overAny ? '<span class="tag st-rejected">Over Budget</span>' : ''}
-      ${r.manager_decision ? `<span class="tag ${r.manager_decision === 'อนุมัติ' ? 'st-approved' : 'st-rejected'}">หัวหน้า${esc(r.manager_decision)}เกินงบ</span>` : ''}
+      ${r.files && r.files.length ? `<span class="tag none">📎 ${r.files.length}</span>` : ''}
       <span class="amt">${money(r.total)}</span>
     </div>
     ${step >= 0 ? `<ol class="flow">${FLOW.map((s, i) => `<li class="${i < step ? 'done' : i === step ? 'now' : ''}">${esc(FLOW_LABEL[s])}</li>`).join('')}</ol>` : ''}
+    ${r.status === ST.EDIT ? `<div class="edit-note"><b>${isRequester(r) ? 'ต้องแก้ไข' : 'รอผู้ขอแก้ไข'}:</b> ${esc(r.admin_note || '')}</div>` : ''}
     <div class="req-meta">${who} · สร้าง ${esc(r.created_at)} · ${r.item_count} รายการ</div>
     ${budgetHtml}
-    ${r.note ? `<div class="req-meta">หมายเหตุ: ${esc(r.note)}</div>` : ''}
+    ${r.note ? `<div class="req-meta">หมายเหตุผู้ขอ: ${esc(r.note)}</div>` : ''}
+    ${fileChips(r)}
     ${r.confirmed_by && r.source === 'round' ? `<div class="req-meta">ยืนยันโดย ${esc(r.confirmed_by)} ${esc(r.confirmed_at)}</div>` : ''}
     ${r.status === ST.OVER_WAIT || r.manager_decision ? `<div class="req-meta">หัวหน้า PC: ${esc(r.manager_email)}${r.manager_note ? ' — ' + esc(r.manager_note) : ''}</div>` : ''}
-    ${r.approval_sent_at ? `<div class="req-meta">ส่งขออนุมัติถึง ${esc(r.approval_to)}${r.approval_cc ? ' (สำเนา ' + esc(r.approval_cc) + ')' : ''} · ${esc(r.approval_sent_at)}</div>` : ''}
+    ${r.approval_sent_at ? `<div class="req-meta">ส่งเมลรายการสั่งซื้อถึง ${esc(r.approval_to)}${r.approval_cc ? ' (สำเนา ' + esc(r.approval_cc) + ')' : ''} · ${esc(r.approval_sent_at)}</div>` : ''}
     ${r.approved_at ? `<div class="req-meta">ผลอนุมัติ: ${esc(r.approved_by)} ${esc(r.approved_at)}${r.approval_note ? ' — ' + esc(r.approval_note) : ''}</div>` : ''}
     ${r.purchasing_sent_at ? `<div class="req-meta">แจ้งฝ่ายจัดซื้อแล้ว ${esc(r.purchasing_sent_at)}</div>` : ''}
-    ${r.decided_by && r.admin_note ? `<div class="req-meta">Admin ${esc(r.decided_by)}${r.decided_at ? ' ' + esc(r.decided_at) : ''} — ${esc(r.admin_note)}</div>` : ''}
+    ${r.status !== ST.EDIT && r.decided_by && r.admin_note ? `<div class="req-meta">Admin ${esc(r.decided_by)}${r.decided_at ? ' ' + esc(r.decided_at) : ''} — ${esc(r.admin_note)}</div>` : ''}
     ${r.po_no ? `<div class="req-meta">PR/PO: <b>${esc(r.po_no)}</b> ${esc(r.po_at)}${r.received_at ? ' · รับของ ' + esc(r.received_at) : ''}</div>` : ''}
-    ${editingReq === r.request_id ? renderConfirmForm(r) : `<details><summary>ดูรายการสินค้า</summary>${reqItemsTable(r, false)}</details>`}
-    ${composing && composing.id === r.request_id ? renderComposer(r) : ''}
-    ${acts.length && editingReq !== r.request_id && !(composing && composing.id === r.request_id) ? `<div class="req-actions">${acts.join('')}</div>` : ''}
+    ${editing && editingReq.mode === 'pc' ? renderConfirmForm(r) : editing && editingReq.mode === 'admin' ? renderAdminEditForm(r)
+      : `<details ${admin && r.status === ST.PENDING ? 'open' : ''}><summary>ดูรายการสินค้า (${r.items.length})</summary>${reqItemsTable(r, false)}</details>`}
+    ${isComposing ? renderComposer(r) : ''}
+    ${acts.length && !editing && !isComposing ? `<div class="req-actions">${acts.join('')}</div>` : ''}
   </div>`;
 }
 
-/** Admin edits recipients / wording, previews the email in the team's format, then sends. */
+function reqItemsTable(r, editable) {
+  const hasBudget = r.items.some(i => i.budget_key);
+  return `<div class="table-wrap" style="max-height:none;margin-top:6px"><table class="grid"><thead><tr>
+    <th>PC</th><th>รหัส</th><th>สินค้า</th>${r.source === 'round' ? '<th class="n">แนะนำ</th>' : ''}<th class="n">จำนวน</th><th>หน่วย</th><th class="n">ราคา/หน่วย</th><th class="n">รวม</th>
+    ${hasBudget && !editable ? '<th>Budget / เดือน</th><th class="n">Store คงเหลือ</th>' : ''}<th>ขอบเขตการใช้งาน / หมายเหตุ</th>
+  </tr></thead><tbody>${r.items.map(i => `<tr data-sku="${esc(i.sku)}" class="${!editable && i.qty === 0 ? 'dim' : ''}">
+    <td class="pc">${esc(i.pc_code)}</td><td class="sku">${esc(String(i.sku).startsWith('NEW-') ? 'ใหม่' : i.sku)}</td><td class="name">${esc(i.name)}</td>
+    ${r.source === 'round' ? `<td class="n dim">${fmt(i.suggested_qty)}</td>` : ''}
+    <td class="n">${editable ? `<input class="qty" type="number" min="0" step="1" data-eq value="${i.qty}" data-cost="${i.unit_cost}">` : fmt(i.qty)}</td>
+    <td>${esc(i.unit)}</td><td class="n">${fmt(i.unit_cost, 2)}</td><td class="n" data-amt>${fmt(i.amount, 2)}</td>
+    ${hasBudget && !editable ? `<td class="small">${esc(i.budget_label)} · ${esc(THAI_MONTH_FULL[i.budget_month] || '')}${i.over_budget ? ' <span class="over">Over</span>' : ''}</td><td class="n">${i.store_balance === '' ? '-' : fmt(i.store_balance)}</td>` : ''}
+    <td>${editable ? `<input class="note" data-en value="${esc(i.note)}">` : esc(i.note)}</td>
+  </tr>`).join('')}</tbody></table></div>`;
+}
+
+// ---- Admin: correct the data (qty, price, budget line, month, note, remove lines)
+
+function renderAdminEditForm(r) {
+  const lineOpts = key => (budgetOpts && budgetOpts.lines || []).map(l => `<option value="${esc(l.key)}" ${l.key === key ? 'selected' : ''}>${esc(l.label)}</option>`).join('');
+  const monthOpts = m => MONTHS_1_12.map(x => `<option value="${x}" ${x === m ? 'selected' : ''}>${MONTH_SHORT[x - 1]}</option>`).join('');
+  return `<div class="confirm-form admin-edit" data-aform="${esc(r.request_id)}">
+    <p class="hint">แก้ไขได้ทุกช่อง · ติ๊ก "ลบ" เพื่อเอารายการออก · ระบบตรวจงบใหม่ (ไม่นับยอดเดิมของคำขอนี้) · ผู้ขอจะได้รับอีเมลแจ้ง</p>
+    <div class="table-wrap" style="max-height:none"><table class="grid"><thead><tr>
+      <th>สินค้า</th><th class="n">จำนวน</th><th>หน่วย</th><th class="n">ราคา/หน่วย</th><th>Budget</th><th>เดือน</th><th>ขอบเขตการใช้งาน</th><th>ลบ</th></tr></thead>
+    <tbody>${r.items.map((i, n) => `<tr data-row="${n}" data-sku="${esc(i.sku)}" data-pc="${esc(i.pc_code)}" data-pcname="${esc(i.pc_name)}" data-bal="${esc(i.store_balance)}">
+      <td><input class="note" data-a="name" value="${esc(i.name)}"><div class="pc">${esc(String(i.sku).startsWith('NEW-') ? 'รายการใหม่' : i.sku)}</div></td>
+      <td class="n"><input class="qty" type="number" min="0" step="1" data-a="qty" value="${i.qty}"></td>
+      <td><input class="unit-in" data-a="unit" value="${esc(i.unit)}"></td>
+      <td class="n"><input class="qty" type="number" min="0" step="0.01" data-a="cost" value="${i.unit_cost}"></td>
+      <td><select class="bsel" data-a="key">${lineOpts(i.budget_key || r.budget_key)}</select></td>
+      <td><select data-a="month">${monthOpts(Number(i.budget_month || r.budget_month))}</select></td>
+      <td><input class="note" data-a="note" value="${esc(i.note)}"></td>
+      <td><input type="checkbox" data-a="rm" aria-label="ลบรายการนี้"></td>
+    </tr>`).join('')}</tbody></table></div>
+    <div class="aedit-budget" data-abudget></div>
+    <div class="field"><label>หมายเหตุการแก้ไข (แจ้งผู้ขอ)</label><input data-anote placeholder="เช่น แก้ Budget เป็นเดือนมิถุนายน"></div>
+    <div class="req-actions"><button class="btn" data-act="asave">บันทึกการแก้ไข</button><button class="btn ghost" data-act="closeedit">ปิด</button></div>
+  </div>`;
+}
+
+/** Items as currently typed in the admin edit form. */
+function adminFormItems(form) {
+  return [...form.querySelectorAll('tr[data-row]')].filter(tr => !tr.querySelector('[data-a="rm"]').checked).map(tr => {
+    const v = a => tr.querySelector(`[data-a="${a}"]`).value;
+    return { sku: tr.dataset.sku, name: v('name'), pc: tr.dataset.pc, pcName: tr.dataset.pcname, unit: v('unit'),
+      qty: Math.max(0, Math.round(Number(v('qty')) || 0)), unitCost: Math.max(0, Number(v('cost')) || 0), note: v('note'),
+      budgetKey: v('key'), month: Number(v('month')), storeBalance: tr.dataset.bal };
+  });
+}
+
+function updateAdminEditBudget(form) {
+  const r = requests.find(x => x.request_id === form.dataset.aform);
+  if (!r) return;
+  const own = {}; // this request's current amounts don't count against itself
+  const holds = [ST.PENDING, ST.APPROVAL_WAIT, ST.OVER_WAIT].includes(r.status);
+  if (holds) r.items.forEach(i => { const k = (i.budget_key || r.budget_key) + '|' + (i.budget_month || r.budget_month); own[k] = (own[k] || 0) + (Number(i.amount) || 0); });
+  const reasons = {};
+  r.items.forEach(i => { if (i.over_reason) reasons[(i.budget_key || r.budget_key) + '|' + (i.budget_month || r.budget_month)] = i.over_reason; });
+  form.querySelectorAll('[data-areason]').forEach(inp => { reasons[inp.dataset.areason] = inp.value; });
+  const g = new Map();
+  adminFormItems(form).forEach(i => { const k = i.budgetKey + '|' + i.month; g.set(k, (g.get(k) || 0) + i.qty * i.unitCost); });
+  const box = form.querySelector('[data-abudget]');
+  box.innerHTML = [...g].map(([k, amt]) => {
+    const { key, month: m } = splitKM(k);
+    const line = budgetLine(key);
+    if (!line) return '';
+    const avail = budgetAvail(line, m).available + (own[k] || 0);
+    const over = amt > avail + 0.004;
+    return `<div class="bline ${over ? 'is-over' : ''}"><div class="row"><span>${esc(line.label)} · ${THAI_MONTH_FULL[m]}</span>
+      <b class="${over ? 'over' : 'ok'}">${money(amt)} / เหลือ ${money(avail)}</b></div>
+      ${over ? `<input class="over-reason" data-areason="${esc(k)}" value="${esc(reasons[k] || '')}" placeholder="เหตุผล Over Budget (จำเป็น)">` : ''}</div>`;
+  }).join('');
+}
+
+// ---- email composer (order list + budget → thanakorn@ first; Purchasing after approval)
+
 function renderComposer(r) {
   const d = composing.draft;
   if (!d) return '<div class="composer"><p class="hint">กำลังเตรียมอีเมล…</p></div>';
   const purch = composing.kind === 'purchasing';
+  const files = d.files || [];
   return `<div class="composer" data-compose="${esc(r.request_id)}">
-    <h4>${purch ? 'ส่งแจ้งฝ่ายจัดซื้อ (ได้รับการอนุมัติแล้ว)' : 'ส่งอีเมลขออนุมัติผู้บริหาร'}</h4>
+    <h4>${purch ? 'ส่งแจ้งฝ่ายจัดซื้อ (ได้รับการอนุมัติแล้ว)' : 'ส่งเมลรายการสั่งซื้อ + Budget'}</h4>
     <div class="compose-grid">
       <label>ถึง<input data-c="to" value="${esc(d.to)}" placeholder="อีเมล คั่นด้วย ,"></label>
       <label>สำเนา (CC)<input data-c="cc" value="${esc(d.cc)}" placeholder="ผู้เกี่ยวข้อง"></label>
       <label>เรื่อง<input data-c="subject" value="${esc(d.subject)}"></label>
-      <label>เรียน<input data-c="greeting" value="${esc(d.greeting)}" placeholder="${purch ? 'ฝ่ายจัดซื้อ' : 'เช่น คุณวสุ'}"></label>
+      <label>เรียน<input data-c="greeting" value="${esc(d.greeting)}" placeholder="${purch ? 'ฝ่ายจัดซื้อ' : 'เช่น ผู้บริหาร / คุณวสุ'}"></label>
       <label class="wide">ข้อความเพิ่มเติม<textarea data-c="intro" rows="2" placeholder="เช่น ****เบื้องต้นได้ปรึกษา…เรียบร้อยค่ะ">${esc(d.intro)}</textarea></label>
       <label class="wide">ลิงก์แนบ (ไม่บังคับ)<input data-c="link" value="${esc(d.link)}" placeholder="https://…"></label>
     </div>
-    <p class="hint">ค่าตั้งต้นของผู้รับ/ข้อความ แก้ได้ที่ Admin → ตั้งค่าอีเมลขออนุมัติ · หัวหน้าตอบกลับ "Approved" ทางอีเมล แล้วกด "บันทึก: ผู้บริหารอนุมัติแล้ว"</p>
+    <div class="attach-box"><b>ไฟล์แนบ</b>
+      <label><input type="checkbox" data-attach="excel" checked> 📊 ${esc(d.excelName || 'รายการสั่งซื้อและ Budget.xlsx')} <span class="hint">(สร้างจากรายการ + Budget ตอนส่ง)</span></label>
+      ${files.map(f => `<label><input type="checkbox" data-attach="${esc(f.id)}" checked> 📎 ${esc(f.name)} <span class="hint">${kb(f.size)}</span>
+        <button type="button" class="link-btn" data-file="${esc(f.id)}">เปิดดู</button></label>`).join('') || '<span class="hint">ผู้ขอไม่ได้แนบใบเสนอราคา</span>'}
+    </div>
+    <p class="hint">ค่าตั้งต้นแก้ได้ที่ สมาชิก &amp; ตั้งค่า → ตั้งค่าอีเมล · ได้รับ "Approved" แล้วกด "บันทึก: ได้รับอนุมัติแล้ว"</p>
     <iframe class="mail-preview" title="ตัวอย่างอีเมล" sandbox srcdoc="${esc(d.html)}"></iframe>
     <div class="req-actions">
-      <button class="btn" data-act="sendmail">${purch ? 'ส่งถึงฝ่ายจัดซื้อ' : 'ส่งอีเมลขออนุมัติ'}</button>
+      <button class="btn" data-act="sendmail">${purch ? 'ส่งถึงฝ่ายจัดซื้อ' : 'ส่งเมล'}</button>
       <button class="btn ghost" data-act="previewmail">อัปเดตตัวอย่าง</button>
       <button class="btn ghost" data-act="closecompose">ปิด</button>
     </div>
@@ -1396,7 +1801,10 @@ function renderComposer(r) {
 function composerValues(id) {
   const box = document.querySelector(`[data-compose="${CSS.escape(id)}"]`);
   const v = {};
-  if (box) box.querySelectorAll('[data-c]').forEach(el => { v[el.dataset.c] = el.value; });
+  if (!box) return v;
+  box.querySelectorAll('[data-c]').forEach(el => { v[el.dataset.c] = el.value; });
+  v.attachExcel = !!(box.querySelector('[data-attach="excel"]') || {}).checked;
+  v.attachFileIds = [...box.querySelectorAll('[data-attach]:not([data-attach="excel"])')].filter(x => x.checked).map(x => x.dataset.attach);
   return v;
 }
 
@@ -1406,7 +1814,7 @@ async function openComposer(id, kind, overrides) {
   try {
     const d = await gasCall('getApprovalDraft', id, kind, overrides || null);
     if (!composing || composing.id !== id) return;
-    composing.draft = overrides ? { ...d, ...overrides, html: d.html } : d;
+    composing.draft = overrides ? { ...d, ...overrides, html: d.html, files: d.files, excelName: d.excelName } : d;
     renderRequests();
     const box = document.querySelector(`[data-compose="${CSS.escape(id)}"]`);
     if (box && !overrides) box.scrollIntoView({ block: 'start' });
@@ -1415,26 +1823,38 @@ async function openComposer(id, kind, overrides) {
   }
 }
 
-function reqItemsTable(r, editable) {
-  const hasBudget = r.items.some(i => i.budget_key);
-  return `<div class="table-wrap" style="max-height:none;margin-top:6px"><table class="grid"><thead><tr>
-    <th>PC</th><th>รหัส</th><th>สินค้า</th>${r.source === 'round' ? '<th class="n">แนะนำ</th>' : ''}<th class="n">จำนวน</th><th>หน่วย</th><th class="n">ราคา/หน่วย</th><th class="n">รวม</th>
-    ${hasBudget && !editable ? '<th>Budget / เดือน</th><th class="n">Store คงเหลือ</th>' : ''}<th>ขอบเขตการใช้งาน / หมายเหตุ</th>
-  </tr></thead><tbody>${r.items.map(i => `<tr data-sku="${esc(i.sku)}" class="${!editable && i.qty === 0 ? 'dim' : ''}">
-    <td class="pc">${esc(i.pc_code)}</td><td class="sku">${esc(i.sku)}</td><td class="name">${esc(i.name)}</td>
-    ${r.source === 'round' ? `<td class="n dim">${fmt(i.suggested_qty)}</td>` : ''}
-    <td class="n">${editable ? `<input class="qty" type="number" min="0" step="1" data-eq value="${i.qty}" data-cost="${i.unit_cost}">` : fmt(i.qty)}</td>
-    <td>${esc(i.unit)}</td><td class="n">${fmt(i.unit_cost, 2)}</td><td class="n" data-amt>${fmt(i.amount, 2)}</td>
-    ${hasBudget && !editable ? `<td class="small">${esc(i.budget_label)} · ${esc(THAI_MONTH_FULL[i.budget_month] || '')}${i.over_budget ? ' <span class="over">Over</span>' : ''}</td><td class="n">${i.store_balance === '' ? '-' : fmt(i.store_balance)}</td>` : ''}
-    <td>${editable ? `<input class="note" data-en value="${esc(i.note)}">` : esc(i.note)}</td>
-  </tr>`).join('')}</tbody></table></div>`;
-}
+// ---- quotation viewer (admin checks the files; requester sees their own)
 
-/** Step 6 form: edit quantities, choose budget line + month, confirm. */
+async function openQuote(fileId) {
+  const dlg = $('#fileViewer');
+  $('#fileViewerBody').innerHTML = '<p class="hint">กำลังเปิดไฟล์…</p>';
+  $('#fileViewerTitle').textContent = 'ใบเสนอราคา';
+  if (!dlg.open) dlg.showModal();
+  try {
+    const f = await gasCall('getQuoteFile', fileId);
+    const bytes = Uint8Array.from(atob(f.data), c => c.charCodeAt(0));
+    const url = URL.createObjectURL(new Blob([bytes], { type: f.mime || 'application/octet-stream' }));
+    $('#fileViewerTitle').textContent = f.name;
+    const dl = `<a class="btn sm" href="${url}" download="${esc(f.name)}">ดาวน์โหลด</a>`;
+    $('#fileViewerBody').innerHTML = /^image\//.test(f.mime) ? `<img src="${url}" alt="${esc(f.name)}">${dl}`
+      : /pdf/.test(f.mime) ? `<iframe src="${url}" title="${esc(f.name)}"></iframe>${dl}`
+      : `<p class="hint">ไฟล์ประเภทนี้เปิดดูในเบราว์เซอร์ไม่ได้</p>${dl}`;
+  } catch (e) {
+    $('#fileViewerBody').innerHTML = `<p class="over">เปิดไฟล์ไม่ได้: ${esc(errMsg(e))}</p>`;
+  }
+}
+document.addEventListener('click', e => {
+  const f = e.target.closest('[data-file]');
+  if (f) { e.preventDefault(); openQuote(f.dataset.file); return; }
+  if (e.target.closest('[data-closeviewer]')) $('#fileViewer').close();
+});
+
+// ---- PC round confirm form (Admin → PC owners)
+
 function renderConfirmForm(r) {
   const pcDefault = (masterPc.find(p => p.pc_code === r.pc_code) || {}).default_budget_key || '';
   const cur = r.budget_key || pcDefault;
-  const opts = budgetOpts && budgetOpts.lines.length
+  const opts = hasBudget()
     ? budgetOpts.lines.map(l => `<option value="${esc(l.key)}" ${l.key === cur ? 'selected' : ''}>${esc(l.label)}</option>`).join('')
     : '<option value="">— ยังไม่มีข้อมูล Budget —</option>';
   const m = Number(r.budget_month) || new Date().getMonth() + 1;
@@ -1460,11 +1880,12 @@ function updateConfirmInfo(form) {
   let total = 0;
   form.querySelectorAll('tr[data-sku]').forEach(tr => {
     const q = tr.querySelector('[data-eq]');
+    if (!q) return;
     const amt = Math.max(0, Math.round(Number(q.value) || 0)) * Number(q.dataset.cost);
     tr.querySelector('[data-amt]').textContent = fmt(amt, 2);
     total += amt;
   });
-  const line = budgetOpts && budgetOpts.lines.find(l => l.key === form.querySelector('[data-bsel]').value);
+  const line = budgetLine(form.querySelector('[data-bsel]').value);
   const mon = Number(form.querySelector('[data-msel]').value);
   const box = form.querySelector('[data-binfo]');
   const overBox = form.querySelector('[data-overbox]');
@@ -1478,13 +1899,16 @@ function updateConfirmInfo(form) {
     <div class="row"><span>หลังยืนยัน</span><b class="${b.available - total < 0 ? 'over' : 'ok'}">${money(b.available - total)}${b.available - total < 0 ? ' (งบไม่พอ — ติ๊กขอ Over Budget พร้อมเหตุผล)' : ''}</b></div>`;
 }
 
-$('#reqFilter').addEventListener('change', renderRequests);
+$('#reqFilter').addEventListener('change', () => { reqFilterSet = true; renderRequests(); });
+$('#reqSearch').addEventListener('input', renderRequests);
 $('#btnReloadReq').addEventListener('click', () => { loadRequests(); refreshBudget(); });
 $('#reqDash').addEventListener('click', e => {
   const c = e.target.closest('[data-filter]');
-  if (c) { $('#reqFilter').value = c.dataset.filter; renderRequests(); }
+  if (c) { $('#reqFilter').value = $('#reqFilter').value === c.dataset.filter ? '' : c.dataset.filter; renderRequests(); }
 });
 $('#reqList').addEventListener('input', e => {
+  const aform = e.target.closest('[data-aform]');
+  if (aform && !e.target.matches('[data-areason]')) { updateAdminEditBudget(aform); return; }
   const form = e.target.closest('[data-form]');
   if (!form) return;
   if (e.target.matches('[data-bsearch]')) {
@@ -1495,23 +1919,37 @@ $('#reqList').addEventListener('input', e => {
   }
   updateConfirmInfo(form);
 });
-$('#reqList').addEventListener('change', e => { const form = e.target.closest('[data-form]'); if (form) updateConfirmInfo(form); });
+$('#reqList').addEventListener('change', e => {
+  const aform = e.target.closest('[data-aform]');
+  if (aform && !e.target.matches('[data-areason]')) { updateAdminEditBudget(aform); return; }
+  const form = e.target.closest('[data-form]'); if (form) updateConfirmInfo(form);
+});
 
 $('#reqList').addEventListener('click', async e => {
   const btn = e.target.closest('[data-act]');
   if (!btn) return;
   const id = btn.closest('[data-id]').dataset.id, act = btn.dataset.act;
   const r = requests.find(x => x.request_id === id);
-  if (act === 'edit') {
-    editingReq = id; renderRequests();
-    const form = document.querySelector(`[data-form="${CSS.escape(id)}"]`);
-    if (form) { updateConfirmInfo(form); form.scrollIntoView({ block: 'start' }); }
+  if (act === 'edit' || act === 'aedit') {
+    editingReq = { id, mode: act === 'edit' ? 'pc' : 'admin' }; composing = null; renderRequests();
+    const form = document.querySelector(`[data-form="${CSS.escape(id)}"], [data-aform="${CSS.escape(id)}"]`);
+    if (form) { form.matches('[data-form]') ? updateConfirmInfo(form) : updateAdminEditBudget(form); form.scrollIntoView({ block: 'start' }); }
     return;
   }
   if (act === 'closeedit') { editingReq = null; renderRequests(); return; }
   if (act === 'compose' || act === 'purchasing') { editingReq = null; return openComposer(id, act === 'purchasing' ? 'purchasing' : 'approval'); }
   if (act === 'closecompose') { composing = null; renderRequests(); return; }
   if (act === 'previewmail') { const v = composerValues(id); composing.draft = { ...composing.draft, ...v }; return openComposer(id, composing.kind, v); }
+  if (act === 'recall') {
+    if (r.status === ST.PENDING && !confirm(`เรียก ${id} กลับมาแก้ไข?\nคำขอจะออกจากคิว Admin จนกว่าจะกดส่งใหม่`)) return;
+    btn.disabled = true;
+    try {
+      const full = await gasCall('recallRequest', id);
+      if (loadIntoDraft(full)) { toast(`เปิด ${id} ในหน้าสั่งซื้อแล้ว — แก้ไขแล้วกด "บันทึกและส่งใหม่"`); goTab('order'); }
+      loadRequests(true); refreshBudget();
+    } catch (err) { toast('ไม่สำเร็จ: ' + errMsg(err)); btn.disabled = false; }
+    return;
+  }
 
   let call, done = 'บันทึกแล้ว — แจ้งผู้เกี่ยวข้องทางอีเมลแล้ว';
   if (act === 'confirm') {
@@ -1526,6 +1964,16 @@ $('#reqList').addEventListener('click', async e => {
     if (overNeeded && !(form.querySelector('[data-cover]').checked && overReason)) return toast('งบไม่พอ — ติ๊ก "ขอ Over Budget" และใส่เหตุผล หรือแก้จำนวน/Budget');
     if (!confirm(`ยืนยัน ${id} ส่งให้ Admin ตรวจ?${overNeeded ? '\n(ขอ Over Budget)' : ''}`)) return;
     call = () => gasCall('confirmRequest', id, { items, budgetKey, month, note: form.querySelector('[data-note]').value, overReason: overNeeded ? overReason : '' });
+  } else if (act === 'asave') {
+    const form = btn.closest('[data-aform]');
+    const items = adminFormItems(form).filter(i => i.qty > 0);
+    if (!items.length) return toast('ต้องมีอย่างน้อย 1 รายการ — ถ้าไม่ต้องการคำขอนี้ ให้กด "ลบ"');
+    const overReasons = {};
+    const missing = [...form.querySelectorAll('[data-areason]')].filter(inp => { overReasons[inp.dataset.areason] = inp.value.trim(); return !inp.value.trim(); });
+    if (missing.length) return toast('งบไม่พอ — ใส่เหตุผล Over Budget หรือเปลี่ยน Budget / เดือน / จำนวน');
+    if (!confirm(`บันทึกการแก้ไข ${id}?\nผู้ขอจะได้รับอีเมลแจ้ง`)) return;
+    call = () => gasCall('adminUpdateRequest', id, { items, overReasons, adminNote: form.querySelector('[data-anote]').value.trim() });
+    done = 'บันทึกการแก้ไขแล้ว — แจ้งผู้ขอแล้ว';
   } else if (act === 'pcreject') {
     const note = prompt(`${r.pc_code}: ไม่สั่งรอบนี้ — เหตุผล (ไม่บังคับ)`, ''); if (note === null) return;
     call = () => gasCall('rejectByPc', id, note);
@@ -1533,21 +1981,26 @@ $('#reqList').addEventListener('click', async e => {
     const v = composerValues(id);
     if (!v.to || !v.to.includes('@')) return toast('กรุณาใส่อีเมลผู้รับ (ถึง)');
     const purch = composing.kind === 'purchasing';
-    if (!confirm(`ส่งอีเมล "${v.subject}"\nถึง: ${v.to}${v.cc ? '\nสำเนา: ' + v.cc : ''}\n\nยืนยันส่ง?`)) return;
+    const nAtt = (v.attachExcel ? 1 : 0) + v.attachFileIds.length;
+    if (!confirm(`ส่งอีเมล "${v.subject}"\nถึง: ${v.to}${v.cc ? '\nสำเนา: ' + v.cc : ''}\nไฟล์แนบ ${nAtt} ไฟล์\n\nยืนยันส่ง?`)) return;
     call = () => gasCall(purch ? 'sendPurchasingEmail' : 'sendApprovalEmail', id, v);
-    done = purch ? 'ส่งแจ้งฝ่ายจัดซื้อแล้ว' : 'ส่งอีเมลขออนุมัติแล้ว — รอผู้บริหารตอบกลับ';
+    done = purch ? 'ส่งแจ้งฝ่ายจัดซื้อแล้ว' : `ส่งเมลรายการสั่งซื้อ + Budget ถึง ${v.to} แล้ว`;
   } else if (act === 'approvedok' || act === 'approvedno') {
     const ok = act === 'approvedok';
-    const note = prompt(ok ? `${id}: ผู้บริหารอนุมัติ — หมายเหตุ (ไม่บังคับ เช่น "Approved" ทางอีเมล วันที่…)` : `${id}: เหตุผลที่ไม่อนุมัติ`, ok ? 'Approved' : '');
+    const note = prompt(ok ? `${id}: ได้รับอนุมัติ — หมายเหตุ (เช่น "Approved" ทางอีเมล วันที่…)` : `${id}: เหตุผลที่ไม่อนุมัติ`, ok ? 'Approved' : '');
     if (note === null) return;
     call = () => gasCall('recordApproval', id, ok, note);
+  } else if (act === 'return') {
+    const note = prompt(`ส่ง ${id} กลับให้ผู้ขอแก้ไข — บอกสิ่งที่ต้องแก้:`, ''); if (!note) return;
+    call = () => gasCall('returnForEdit', id, note);
+    done = 'ส่งกลับให้ผู้ขอแก้ไขแล้ว';
   } else if (act === 'reject') {
     const note = prompt(`เหตุผลที่ไม่อนุมัติ ${id}:`); if (note === null) return;
     call = () => gasCall('decideRequest', id, 'reject', note);
-  } else if (act === 'overbudget') {
-    const mgr = prompt('อีเมลหัวหน้า PC ที่จะขออนุมัติเกินงบ:', r.manager_email || ''); if (mgr === null) return;
-    const why = prompt('เหตุผล/รายละเอียดเพิ่มเติม (ไม่บังคับ):', ''); if (why === null) return;
-    call = () => gasCall('requestOverBudget', id, mgr, why);
+  } else if (act === 'delete') {
+    if (!confirm(`ลบคำขอ ${id} (${r.status}, ${money(r.total)}) ทั้งหมด?\nรายการสินค้าจะถูกลบ ใบเสนอราคาย้ายไปถังขยะของ Drive — ย้อนกลับไม่ได้ในระบบ`)) return;
+    call = () => gasCall('deleteRequest', id);
+    done = 'ลบคำขอแล้ว';
   } else if (act === 'mgrok' || act === 'mgrno') {
     const note = prompt(act === 'mgrok' ? 'อนุมัติเกินงบ — หมายเหตุ (ไม่บังคับ)' : 'เหตุผลที่ไม่อนุมัติ:', ''); if (note === null) return;
     call = () => gasCall('managerDecision', id, act === 'mgrok', note);
@@ -1566,6 +2019,7 @@ $('#reqList').addEventListener('click', async e => {
   try {
     requests = await call();
     editingReq = null; composing = null;
+    if (state.draft.editId === id && [ 'delete', 'cancel' ].includes(act)) resetDraft();
     updateReqBadge(); renderRequests(); refreshBudget();
     toast(`${id}: ${done}`);
   } catch (err) {
@@ -1573,24 +2027,24 @@ $('#reqList').addEventListener('click', async e => {
   }
 });
 
-// Step 5: admin sends the cart to each PC's owners for confirmation
+// Admin: send the draft to each PC's owners for confirmation
 $('#btnRound').addEventListener('click', async () => {
-  const items = cartRows().filter(x => x.c.qty > 0);
-  if (!items.length) return toast('ยังไม่ได้เลือกรายการ');
-  const pcs = [...new Set(items.map(x => x.r.pc || x.r.group))];
+  const lines = state.draft.lines.filter(l => Number(l.qty) > 0);
+  if (!lines.length) return toast('ยังไม่มีรายการ');
+  const pcs = [...new Set(lines.map(l => l.pc || (lineStore(l) || {}).pc || ''))];
   const noOwner = pcs.filter(pc => !(masterPc.find(p => p.pc_code === pc) || {}).owner_emails);
-  if (!confirm(`ส่ง ${items.length} รายการ แยก ${pcs.length} PC ให้ผู้รับผิดชอบยืนยันทางอีเมล?` +
-    (noOwner.length ? `\n\n⚠ ยังไม่มีอีเมลผู้รับผิดชอบใน Master PC: ${noOwner.join(', ')}\n(สร้างคำขอไว้ แต่ยังไม่ส่งอีเมล — ตั้งในแท็บ Admin)` : ''))) return;
+  if (!confirm(`ส่ง ${lines.length} รายการ แยก ${pcs.length} PC ให้ผู้รับผิดชอบยืนยันทางอีเมล?` +
+    (noOwner.length ? `\n\n⚠ ยังไม่มีอีเมลผู้รับผิดชอบใน Master PC: ${noOwner.join(', ')}\n(สร้างคำขอไว้ แต่ยังไม่ส่งอีเมล — ตั้งในสมาชิก & ตั้งค่า)` : ''))) return;
   $('#btnRound').disabled = true;
   try {
-    const res = await gasCall('createRound', items.map(({ r, c }) => ({
-      sku: r.sku, name: r.name, pc: r.pc || r.group, pcName: r.pcName, unit: r.unit, qty: c.qty, unitCost: r.cost, note: c.note
+    const res = await gasCall('createRound', lines.map(l => ({
+      sku: l.sku, name: lineName(l), pc: l.pc || (lineStore(l) || {}).pc || '', pcName: l.pcName || '', unit: lineUnit(l), qty: Number(l.qty), unitCost: lineCost(l), note: l.note || ''
     })), $('#roundNote').value);
-    state.cart = {}; $('#roundNote').value = ''; save(); renderCards(); renderCart();
+    resetDraft(); $('#roundNote').value = ''; renderCards(); renderOrder();
     toast(`สร้างรอบ ${res.roundId}: ${res.created.length} PC` + (res.noOwner.length ? ` · ยังไม่ส่งอีเมล: ${res.noOwner.join(', ')}` : ' · ส่งอีเมลครบแล้ว'));
-    $('#reqFilter').value = ST.WAIT_PC;
-    await loadRequests();
-    document.querySelector('.tab[data-tab="requests"]').click();
+    $('#reqFilter').value = ST.WAIT_PC; reqFilterSet = true;
+    await loadRequests(true);
+    goTab('requests');
   } catch (e) {
     toast('ส่งไม่สำเร็จ: ' + errMsg(e));
   } finally {
@@ -1827,7 +2281,8 @@ function renderBudget() {
       const t = g.total;
       const open = budgetOpen === g.key;
       return `<tr class="brow ${open ? 'sel' : ''}" data-bkey="${esc(g.key)}">
-          <td class="name"><span class="caret">${open ? '▾' : '▸'}</span> ${esc(g.label)}${g.lines > 1 ? `<div class="pc">${g.lines} รายการ</div>` : ''}</td>
+          <td class="name"><span class="caret">${open ? '▾' : '▸'}</span> ${esc(g.label)}${g.lines > 1 ? `<div class="pc">${g.lines} รายการ</div>` : ''}
+            ${budgetLine(g.key) ? `<button class="btn xs" data-order-line="${esc(g.key)}">สั่งซื้อในงบนี้</button>` : ''}</td>
           <td class="n">${fmt(t.plan)}</td><td class="n">${fmt(t.actual)}</td>
           <td class="n">${fmt(t.committed)}${t.pending ? `<div class="pc">รอ ${fmt(t.pending)}</div>` : ''}</td>
           <td class="n ${t.left < 0 ? 'over' : 'ok'}"><b>${fmt(t.left)}</b></td><td class="bar-cell">${useBar(t)}</td></tr>
@@ -1854,6 +2309,11 @@ const fmtK = n => Math.abs(n) >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : Math.abs(n) 
 
 ['#bSearch', '#bGroup', '#bMonth', '#bShow'].forEach(s => $(s).addEventListener('input', () => { budgetOpen = null; renderBudget(); }));
 $('#tblBudget').addEventListener('click', e => {
+  const ord = e.target.closest('[data-order-line]');
+  if (ord) {
+    state.pick = { key: ord.dataset.orderLine, month: Number($('#bMonth').value) || new Date().getMonth() + 1 };
+    save(); goTab('order'); return;
+  }
   const tr = e.target.closest('tr.brow');
   if (!tr) return;
   budgetOpen = budgetOpen === tr.dataset.bkey ? null : tr.dataset.bkey;

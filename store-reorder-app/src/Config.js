@@ -24,7 +24,8 @@ var CONFIG = {
     MEMBERS: 'members',               // สมาชิก: ID, ชื่อ, อีเมล, role (admin/user), status, รหัสผ่าน (hash)
     REQUESTS: 'requests',             // คำขอสั่งซื้อจาก user (หัวเอกสาร: งบ, เดือน, สถานะ)
     REQUEST_ITEMS: 'request_items',   // รายการสินค้าในแต่ละคำขอ
-    SETTINGS: 'settings'              // ค่าตั้งต้นอีเมลขออนุมัติ (ผู้อนุมัติ, สำเนา, ฝ่ายจัดซื้อ, ลายเซ็น)
+    SETTINGS: 'settings',             // ค่าตั้งต้นอีเมลขออนุมัติ (ผู้อนุมัติ, สำเนา, ฝ่ายจัดซื้อ, ลายเซ็น)
+    REQUEST_FILES: 'request_files'    // ใบเสนอราคาที่แนบกับคำขอ (ไฟล์อยู่ใน Google Drive ของเจ้าของสคริปต์)
   },
 
   // อีเมลของ Admin เริ่มต้น (ใช้รับอีเมลแจ้งเตือน) — แก้ได้ภายหลังในแท็บ Admin
