@@ -1658,6 +1658,25 @@ function reqBudgetLines(r) {
   });
 }
 
+// หน้าคำขอแบ่งเป็น "ขั้นตอน" ไม่ใช่กองเดียว — แต่ละขั้นบอกว่าตอนนี้รอใคร และฝั่งเราต้องทำอะไร
+const STAGES = [
+  { id: 'back', no: 1, title: 'อยู่ที่ผู้ขอ', st: [ST.WAIT_PC, ST.EDIT],
+    admin: 'ส่งกลับให้ผู้ขอ/PC แก้แล้ว — รอเขาส่งกลับมา', user: 'แก้ไขแล้วกด "แก้ไขแล้วส่งใหม่" หรือยืนยันจำนวนให้ Admin' },
+  { id: 'check', no: 2, title: 'Admin ตรวจ', st: [ST.PENDING, ST.OVER_WAIT],
+    admin: 'ตรวจรายการ + Budget + ใบเสนอราคา → แก้ไข/ส่งกลับ หรือกด "ส่งเมลรายการสั่งซื้อ + Budget"', user: 'ส่งให้ Admin แล้ว — เรียกกลับมาแก้ไขได้จนกว่า Admin จะส่งเมล' },
+  { id: 'approve', no: 3, title: 'รอผู้บริหารอนุมัติ', st: [ST.APPROVAL_WAIT],
+    admin: 'ส่งเมลแล้ว — เมื่อได้ "Approved" กด "บันทึก: ได้รับอนุมัติแล้ว"', user: 'รอผลอนุมัติทางอีเมล' },
+  { id: 'po', no: 4, title: 'อนุมัติแล้ว — ออก PR/PO', st: [ST.APPROVED],
+    admin: 'ส่งแจ้งฝ่ายจัดซื้อ → ใส่เลข PR/PO รายชิ้น + กำหนดส่ง (ตัดงบตอนได้เลข PO)', user: 'อนุมัติแล้ว รอฝ่ายจัดซื้อออก PR/PO' },
+  { id: 'wait', no: 5, title: 'รอของมาส่ง', st: [ST.PO],
+    admin: 'ติดตามของ → ติ๊กรายการที่มาถึงแล้วใส่วันที่รับของ', user: 'ออก PR/PO แล้ว — ดูกำหนดส่งได้ที่แท็บติดตามการส่งของ' },
+  { id: 'done', no: 6, title: 'รับของแล้ว', st: [ST.RECEIVED], admin: 'จบขั้นตอน', user: 'ของเข้า Store แล้ว' },
+  { id: 'closed', no: 7, title: 'ไม่อนุมัติ / ยกเลิก', st: [ST.REJECTED, ST.CANCELLED, ST.PC_REJECTED],
+    admin: 'ปิดแล้ว — ผู้ขอแก้แล้วส่งใหม่ได้', user: 'ปิดแล้ว — แก้ไขแล้วส่งใหม่ได้' }
+];
+const stageOf = r => (STAGES.find(s => s.st.includes(r.status)) || STAGES[1]).id;
+let stageFilter = '';
+
 function renderRequests() {
   const admin = isAdmin();
   $('#reqTitle').textContent = admin ? 'ตรวจคำขอสั่งซื้อ' : 'คำขอของฉัน';
@@ -1665,12 +1684,28 @@ function renderRequests() {
   const f = $('#reqFilter').value;
   const words = $('#reqSearch').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const text = r => [r.request_id, r.requester_name, r.requester_email, r.note, r.budget_label, ...r.items.map(i => i.name + ' ' + i.sku)].join(' ').toLowerCase();
-  const list = requests.filter(r => (!f || (f === 'todo' ? needsMe(r) : r.status === f)) && words.every(w => text(r).includes(w)));
-  const by = {};
-  for (const r of requests) { by[r.status] = by[r.status] || { n: 0, v: 0 }; by[r.status].n++; by[r.status].v += Number(r.total) || 0; }
-  $('#reqDash').innerHTML = Object.values(ST).filter(s => by[s]).map(s =>
-    `<button class="dash-chip ${STATUS_CLASS[s]} ${f === s ? 'sel' : ''}" data-filter="${esc(s)}"><b>${by[s].n}</b> ${esc(s)}<span>${money(by[s].v)}</span></button>`).join('');
-  $('#reqInfo').textContent = `${list.length} คำขอ${admin ? '' : ' ของฉัน / ที่เกี่ยวกับฉัน'}`;
+  const list = requests.filter(r => (!f || (f === 'todo' ? needsMe(r) : r.status === f)) && words.every(w => text(r).includes(w))
+    && (!stageFilter || stageOf(r) === stageFilter));
+
+  // แถบขั้นตอน: นับจากคำขอที่ผ่านตัวกรองค้นหา/สถานะ แต่ยังไม่กรองขั้นตอน (กดเพื่อดูเฉพาะขั้นนั้น)
+  const pool = requests.filter(r => (!f || (f === 'todo' ? needsMe(r) : r.status === f)) && words.every(w => text(r).includes(w)));
+  const byStage = {};
+  for (const r of pool) {
+    const k = stageOf(r);
+    byStage[k] = byStage[k] || { n: 0, v: 0, todo: 0 };
+    byStage[k].n++; byStage[k].v += Number(r.total) || 0;
+    if (needsMe(r)) byStage[k].todo++;
+  }
+  $('#reqDash').innerHTML = `<div class="stage-bar">${STAGES.map(s => {
+    const b = byStage[s.id] || { n: 0, v: 0, todo: 0 };
+    return `<button class="stage-chip ${stageFilter === s.id ? 'sel' : ''} ${b.todo ? 'todo' : ''} ${b.n ? '' : 'empty'}" data-stage="${s.id}"
+      title="${esc(admin ? s.admin : s.user)}"><span class="sn">${s.no}</span>
+      <span class="st-title">${esc(s.title)}</span><b>${b.n}</b>${b.todo ? `<span class="dot" title="รอคุณ ${b.todo}">${b.todo}</span>` : ''}
+      <span class="st-sum">${b.n ? money(b.v) : '—'}</span></button>`;
+  }).join('')}</div>${stageFilter ? `<button class="link-btn" data-stage="">← ดูทุกขั้นตอน</button>` : ''}`;
+
+  $('#reqInfo').textContent = `${list.length} คำขอ${admin ? '' : ' ของฉัน / ที่เกี่ยวกับฉัน'}` +
+    (stageFilter ? ` · เฉพาะขั้นที่ ${(STAGES.find(s => s.id === stageFilter) || {}).no}` : '');
   visibleReqs = list.map(r => r.request_id);
   updateBulkBar();
   const banner = serverOutdated ? `<div class="alert-row"><span>${esc(OUTDATED_MSG)}</span></div>` : '';
@@ -1678,7 +1713,19 @@ function renderRequests() {
     $('#reqList').innerHTML = banner + `<div class="empty">${f === 'todo' ? 'ไม่มีงานที่รอคุณ 🎉' : 'ไม่มีคำขอ'}${!admin ? '<br><button class="btn sm" data-go="order">สั่งซื้อตาม Budget</button>' : ''}</div>`;
     return;
   }
-  $('#reqList').innerHTML = banner + list.map(renderReqCard).join('');
+  // จัดการ์ดเข้าแต่ละขั้นตอน ขั้นที่ไม่มีคำขอจะไม่แสดง
+  $('#reqList').innerHTML = banner + STAGES.map(s => {
+    const rows = list.filter(r => stageOf(r) === s.id);
+    if (!rows.length) return '';
+    const v = rows.reduce((a, r) => a + (Number(r.total) || 0), 0);
+    const todo = rows.filter(needsMe).length;
+    return `<details class="stage" id="stage-${s.id}" open>
+      <summary class="stage-h"><span class="sn">${s.no}</span>
+        <span class="stage-t"><b>${esc(s.title)}</b><span class="hint">${esc(admin ? s.admin : s.user)}</span></span>
+        <span class="stage-sum">${rows.length} คำขอ · ${money(v)}${todo ? ` · <span class="over">รอคุณ ${todo}</span>` : ''}</span></summary>
+      <div class="stage-body">${rows.map(renderReqCard).join('')}</div>
+    </details>`;
+  }).join('');
   if (focusReq) {
     const el = document.querySelector(`.req-card[data-id="${CSS.escape(focusReq)}"]`);
     if (el) {
@@ -1689,6 +1736,13 @@ function renderRequests() {
     focusReq = null;
   }
 }
+
+$('#reqDash').addEventListener('click', e => {
+  const b = e.target.closest('[data-stage]');
+  if (!b) return;
+  stageFilter = b.dataset.stage === stageFilter ? '' : b.dataset.stage;
+  renderRequests();
+});
 
 /** Admin: tick several requests and delete them in one go (e.g. rounds nobody answered). */
 function updateBulkBar() {
@@ -2012,10 +2066,6 @@ function updateConfirmInfo(form) {
 $('#reqFilter').addEventListener('change', () => { reqFilterSet = true; renderRequests(); });
 $('#reqSearch').addEventListener('input', renderRequests);
 $('#btnReloadReq').addEventListener('click', () => { loadRequests(); refreshBudget(); });
-$('#reqDash').addEventListener('click', e => {
-  const c = e.target.closest('[data-filter]');
-  if (c) { $('#reqFilter').value = $('#reqFilter').value === c.dataset.filter ? '' : c.dataset.filter; renderRequests(); }
-});
 $('#reqList').addEventListener('input', e => {
   const aform = e.target.closest('[data-aform]');
   if (aform && !e.target.matches('[data-areason]')) { updateAdminEditBudget(aform); return; }
