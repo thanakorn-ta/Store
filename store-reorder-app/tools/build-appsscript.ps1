@@ -27,7 +27,10 @@ $html = $html -replace '<link rel="stylesheet" href="style\.css">', "<?!= includ
 foreach ($js in Get-ChildItem -Path $web -Filter '*.js') {
   $name = [IO.Path]::GetFileNameWithoutExtension($js.Name)
   $body = Read-Text $js.FullName
-  if ($body -match '</script') { throw "$($js.Name) contains '</script' which would break the inline <script> in Apps Script" }
+  # A literal script tag (open or close) inside the file breaks the inlined <script> block that
+  # Apps Script serves - and the failure shows up as a syntax error in the NEXT script.
+  if ($body -match '</script') { throw "$($js.Name) contains '</script' - split the text, e.g. '</scr' + 'ipt>'" }
+  if ($body -match '<script') { throw "$($js.Name) contains '<script' - split the text, e.g. '<scr' + 'ipt'" }
   Write-Text (Join-Path $src "ui_$name.html") ($banner + "<script>`n" + $body + "</script>`n")
   $html = $html -replace ('<script src="' + [regex]::Escape($js.Name) + '"></script>'), "<?!= include('ui_$name'); ?>"
 }

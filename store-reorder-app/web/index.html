@@ -8,6 +8,16 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
+  <script>
+    // A script error during boot would otherwise leave an empty shell (no sign-in form).
+    window.addEventListener('error', function (e) {
+      var b = document.getElementById('bootError');
+      if (!b) return;
+      b.hidden = false;
+      b.textContent = 'หน้าเว็บโหลดไม่สมบูรณ์: ' + ((e.error && e.error.message) || e.message || '') +
+        ' @ บรรทัด ' + (e.lineno || '?') + ' — แจ้ง Admin พร้อมข้อความนี้';
+    });
+  </script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 </head>
 <body>
@@ -59,6 +69,8 @@
     </nav>
 
     <main class="main">
+      <div id="bootError" class="alert-row" hidden></div>
+
       <!-- Sign-in / sign-up -->
       <section id="gate" class="panel" hidden></section>
 

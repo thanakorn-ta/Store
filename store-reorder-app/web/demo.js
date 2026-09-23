@@ -13,5 +13,8 @@
     on = localStorage.getItem(KEY) === '1';
   } catch (e) { on = q.get('demo') === '1'; }
   if (!on) return;
-  document.write('<script src="demo/mock.js"><\/script><script src="demo/server.js"><\/script><script src="demo/seed.js"><\/script>');
+  // The tag names are split on purpose: this file is also inlined into the Apps Script page,
+  // where a literal opening script tag inside a script block breaks the rest of the page.
+  var open = '<scr' + 'ipt src="', close = '"></scr' + 'ipt>';
+  document.write(open + 'demo/mock.js' + close + open + 'demo/server.js' + close + open + 'demo/seed.js' + close);
 })();
