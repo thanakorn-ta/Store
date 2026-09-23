@@ -119,6 +119,8 @@
               <section class="panel step-card">
                 <h3 class="step-h"><span class="num">1</span>เลือก Budget</h3>
                 <input id="obSearch" type="search" placeholder="ค้นหา Location / GL / บริษัท เช่น metro 530090">
+                <p class="hint">แสดงเฉพาะหมวดที่ Store สั่งซื้อ: ค่าซ่อมแซมบำรุงรักษา · ค่าวัสดุสิ้นเปลืองใช้ไป · ค่าซ่อมภาพโฆษณา
+                  (เปิดดูหมวดอื่นได้ที่หน้า งบประมาณ → แสดงทุกหมวดงบ)</p>
                 <div id="obList" class="bl-list"></div>
                 <h3 class="step-h"><span class="num">2</span>เลือกเดือนที่จะใช้ของ</h3>
                 <div id="obMonths" class="month-pills"></div>
@@ -242,6 +244,8 @@
                   <option value="left">ยังเหลือ</option>
                   <option value="used">มีการใช้แล้ว</option>
                 </select>
+                <label class="pw-chk" title="ปกติแสดงเฉพาะหมวดที่ Store สั่งซื้อ: ค่าซ่อมแซมบำรุงรักษา · ค่าวัสดุสิ้นเปลืองใช้ไป · ค่าซ่อมภาพโฆษณา">
+                  <input type="checkbox" id="bAllGl"> แสดงทุกหมวดงบ</label>
                 <span id="bInfo" class="hint"></span>
               </div>
               <p class="hint">คลิกแถวเพื่อดูรายละเอียดแต่ละเดือน · กด "สั่งซื้อในงบนี้" เพื่อไปใส่รายการ · คงเหลือ = งบ − ใช้จริง − คำขอที่อนุมัติ/รออนุมัติ</p>

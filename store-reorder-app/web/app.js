@@ -634,6 +634,22 @@ const snapshot = r => ({ sku: r.sku, name: r.name, unit: r.unit, cost: r.cost ||
 const budgetLine = key => budgetOpts && budgetOpts.lines ? budgetOpts.lines.find(l => l.key === key) : null;
 const hasBudget = () => !!(budgetOpts && budgetOpts.lines && budgetOpts.lines.length);
 
+// Store สั่งซื้อจากงบ 3 หมวดนี้เท่านั้น — หมวดอื่น (เช่น ค่าไฟฟ้าป้ายโฆษณา) ซ่อนไว้
+// จับจากชื่อหมวด ไม่ใช่เลข GL เพราะแต่ละบริษัทใช้เลขไม่เหมือนกัน
+const GL_WORDS = ['ซ่อมแซมบำรุงรักษา', 'วัสดุสิ้นเปลือง', 'ซ่อมภาพ'];
+const GL_ALL_KEY = 'store-reorder-ai:gl-all';
+let showAllGl = false;
+try { showAllGl = localStorage.getItem(GL_ALL_KEY) === '1'; } catch { /* private mode */ }
+const glWanted = l => GL_WORDS.some(w => `${l.glName || ''} ${l.expenseGroup || ''} ${l.label || ''}`.includes(w));
+/** Budget ที่เอามาแสดง/ให้เลือก · budgetLine() ยังหาได้ทุกบรรทัด เพื่อให้คำขอเก่าแสดงผลถูก */
+function budgetLines() {
+  const all = (budgetOpts && budgetOpts.lines) || [];
+  if (showAllGl) return all;
+  const keep = all.filter(glWanted);
+  return keep.length ? keep : all; // ชื่อหมวดในไฟล์ไม่ตรงคำที่รู้จัก → แสดงทั้งหมดดีกว่าหน้าว่าง
+}
+const glHidden = () => ((budgetOpts && budgetOpts.lines) || []).length - budgetLines().length;
+
 function draftTotals() {
   const ls = state.draft.lines;
   return { n: ls.length, v: ls.reduce((a, l) => a + lineAmt(l), 0) };
@@ -713,7 +729,7 @@ function lineYearLeft(line) {
 function renderBudgetPicker() {
   const words = $('#obSearch').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const used = new Set(state.draft.lines.map(l => l.budgetKey));
-  const list = budgetOpts.lines.filter(l => words.every(w => (l.label + ' ' + l.expenseGroup + ' ' + (l.mediaType || '')).toLowerCase().includes(w)));
+  const list = budgetLines().filter(l => words.every(w => (l.label + ' ' + l.expenseGroup + ' ' + (l.mediaType || '')).toLowerCase().includes(w)));
   $('#obList').innerHTML = list.length ? list.map(l => {
     const left = lineYearLeft(l);
     const n = state.draft.lines.filter(x => x.budgetKey === l.key).length;
@@ -1764,7 +1780,7 @@ function reqItemsTable(r, editable) {
 // ---- Admin: correct the data (qty, price, budget line, month, note, remove lines)
 
 function renderAdminEditForm(r) {
-  const lineOpts = key => (budgetOpts && budgetOpts.lines || []).map(l => `<option value="${esc(l.key)}" ${l.key === key ? 'selected' : ''}>${esc(l.label)}</option>`).join('');
+  const lineOpts = key => budgetLines().map(l => `<option value="${esc(l.key)}" ${l.key === key ? 'selected' : ''}>${esc(l.label)}</option>`).join('');
   const monthOpts = m => MONTHS_1_12.map(x => `<option value="${x}" ${x === m ? 'selected' : ''}>${MONTH_SHORT[x - 1]}</option>`).join('');
   return `<div class="confirm-form admin-edit" data-aform="${esc(r.request_id)}">
     <p class="hint">แก้ไขได้ทุกช่อง · ติ๊ก "ลบ" เพื่อเอารายการออก · ระบบตรวจงบใหม่ (ไม่นับยอดเดิมของคำขอนี้) · ผู้ขอจะได้รับอีเมลแจ้ง</p>
@@ -1909,7 +1925,7 @@ function renderConfirmForm(r) {
   const pcDefault = (masterPc.find(p => p.pc_code === r.pc_code) || {}).default_budget_key || '';
   const cur = r.budget_key || pcDefault;
   const opts = hasBudget()
-    ? budgetOpts.lines.map(l => `<option value="${esc(l.key)}" ${l.key === cur ? 'selected' : ''}>${esc(l.label)}</option>`).join('')
+    ? budgetLines().map(l => `<option value="${esc(l.key)}" ${l.key === cur ? 'selected' : ''}>${esc(l.label)}</option>`).join('')
     : '<option value="">— ยังไม่มีข้อมูล Budget —</option>';
   const m = Number(r.budget_month) || new Date().getMonth() + 1;
   return `<div class="confirm-form" data-form="${esc(r.request_id)}">
@@ -1968,7 +1984,7 @@ $('#reqList').addEventListener('input', e => {
   if (e.target.matches('[data-bsearch]')) {
     const words = e.target.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
     const sel = form.querySelector('[data-bsel]'), cur = sel.value;
-    sel.innerHTML = budgetOpts.lines.filter(l => words.every(w => (l.label + ' ' + l.expenseGroup).toLowerCase().includes(w)))
+    sel.innerHTML = budgetLines().filter(l => words.every(w => (l.label + ' ' + l.expenseGroup).toLowerCase().includes(w)))
       .map(l => `<option value="${esc(l.key)}" ${l.key === cur ? 'selected' : ''}>${esc(l.label)}</option>`).join('');
   }
   updateConfirmInfo(form);
@@ -2124,7 +2140,7 @@ function renderMasterPc() {
   const known = new Map(masterPc.map(p => [p.pc_code, p]));
   // PCs seen in the Store data but not yet in master_pc
   for (const r of merged.rows) if (r.pc && !known.has(r.pc)) known.set(r.pc, { pc_code: r.pc, pc_name: r.pcName, owner_emails: '', manager_email: '', default_budget_key: '' });
-  const lines = budgetOpts ? budgetOpts.lines : [];
+  const lines = budgetLines();
   const list = [...known.values()].sort((a, b) => a.pc_code.localeCompare(b.pc_code));
   $('#tblMasterPc').innerHTML = `<thead><tr><th>PC</th><th>ผู้รับผิดชอบ (อีเมล, คั่นด้วย ,)</th><th>หัวหน้า (อนุมัติเกินงบ)</th><th>Budget ตั้งต้น</th><th></th></tr></thead>
     <tbody>${list.map(p => `<tr data-pc="${esc(p.pc_code)}" class="${p.owner_emails ? '' : 'sel'}">
@@ -2259,7 +2275,7 @@ function budgetRows() {
   const month = Number($('#bMonth').value) || 0;
   const by = BUDGET_GROUPS[$('#bGroup').value] || BUDGET_GROUPS.line;
   const groups = new Map();
-  for (const l of budgetOpts.lines) {
+  for (const l of budgetLines()) {
     const text = (l.label + ' ' + l.expenseGroup).toLowerCase();
     if (!words.every(w => text.includes(w))) continue;
     const [key, label] = by(l);
@@ -2309,7 +2325,10 @@ function renderBudget() {
   const rows = budgetRows();
   const total = rows.reduce((a, g) => addCell(a, g.total), zeroCell());
   const overRows = rows.filter(g => g.total.left < 0);
-  $('#budgetSub').textContent = `ปีงบ ${budgetOpts.year || '-'} · ${fmt(budgetOpts.lines.length)} รายการ Budget · ${month ? THAI_MONTH_FULL[month] : 'ทั้งปี'}`;
+  $('#bAllGl').checked = showAllGl;
+  const hidden = glHidden();
+  $('#budgetSub').textContent = `ปีงบ ${budgetOpts.year || '-'} · ${fmt(budgetLines().length)} รายการ Budget · ${month ? THAI_MONTH_FULL[month] : 'ทั้งปี'}`
+    + (hidden ? ` · ซ่อนหมวดอื่นไว้ ${fmt(hidden)} รายการ (แสดงเฉพาะ ค่าซ่อมแซมบำรุงรักษา · ค่าวัสดุสิ้นเปลืองใช้ไป · ค่าซ่อมภาพโฆษณา)` : '');
 
   $('#budgetCards').innerHTML = `
     <div class="card"><div class="k">งบ${month ? 'เดือน' + THAI_MONTH_FULL[month] : 'ทั้งปี'}</div><div class="v">${money(total.plan)}</div><div class="s">${fmt(rows.length)} รายการที่แสดง</div></div>
@@ -2395,10 +2414,16 @@ document.addEventListener('click', e => {
   row && row.scrollIntoView({ block: 'center' });
 });
 $('#btnBudgetReload').addEventListener('click', () => { budgetOpts = null; renderBudget(); refreshBudget(); });
+$('#bAllGl').addEventListener('change', e => {
+  showAllGl = e.target.checked;
+  try { localStorage.setItem(GL_ALL_KEY, showAllGl ? '1' : '0'); } catch { /* private mode */ }
+  renderBudget();
+  if (activeTab === 'order') renderOrder(); // หน้าสั่งซื้อใช้รายการเดียวกัน
+});
 $('#btnBudgetExport').addEventListener('click', () => {
   if (!budgetOpts || !budgetOpts.lines.length) return toast('ยังไม่มีข้อมูล Budget');
   const out = [];
-  for (const l of budgetOpts.lines) for (const m of MONTHS_1_12) {
+  for (const l of budgetLines()) for (const m of MONTHS_1_12) {
     const c = budgetCell(l, m);
     if (!c.plan && !c.actual && !c.pending && !c.committed) continue;
     out.push({ 'บริษัท': l.company, 'Location': l.location, 'GL Code': l.glCode, 'ประเภท': l.glName, 'Expense Group': l.expenseGroup,
