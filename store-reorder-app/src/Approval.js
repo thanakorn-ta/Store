@@ -13,10 +13,13 @@ var SETTINGS_DEFAULTS = {
   approval_to: 'thanakorn@planbmedia.co.th', // first stop: order list + budget go here, then on to the head
   approval_cc: '',
   approval_greeting: 'ผู้บริหาร',
-  approval_intro: '',          // extra line under the budget summary, e.g. "****เบื้องต้นได้ปรึกษา … เรียบร้อยค่ะ"
+  approval_intro: '',          // extra line under the budget summary, e.g. "เบื้องต้นได้ปรึกษาพี่เกมส์เรียบร้อย"
   approval_link: '',           // optional link shown as "โปรดคลิกลิ้งค์"
+  approval_link_text: '',      // what that link is called, e.g. "รายการสั่งซื้ออุปกรณ์ 2569 (ทีม Static)"
   purchasing_to: '',
   purchasing_cc: '',
+  purchasing_intro: '',        // same line for the email to Purchasing (ว่าง = ใช้ของอีเมลขออนุมัติ)
+  polite: 'ค่ะ',               // ต่อท้ายประโยคตามแบบของทีม (ค่ะ / ครับ / เว้นว่าง)
   signature: ''
 };
 var THAI_MONTH_FULL = ['', 'มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน',
@@ -72,7 +75,8 @@ function getApprovalDraft(id, kind, overrides) {
   var s = readSettings_(ss);
   kind = kind === 'purchasing' ? 'purchasing' : 'approval';
   var o = kind === 'purchasing'
-    ? { to: s.purchasing_to, cc: s.purchasing_cc, greeting: 'ฝ่ายจัดซื้อ', intro: s.approval_intro, link: s.approval_link }
+    ? { to: s.purchasing_to, cc: s.purchasing_cc, greeting: 'ฝ่ายจัดซื้อ',
+        intro: s.purchasing_intro || s.approval_intro, link: s.approval_link }
     : { to: req.approval_to || s.approval_to, cc: req.approval_cc || s.approval_cc, greeting: s.approval_greeting,
         intro: s.approval_intro, link: s.approval_link };
   o.kind = kind;
@@ -268,6 +272,7 @@ function buildApprovalHtml_(ss, req, o, s, kind) {
   var monthText = months.map(function (m) { return THAI_MONTH_FULL[m]; }).join(',') + ' ' + be;
   var team = s.team_name ? ' (' + esc_(s.team_name) + ')' : '';
   var approved = kind === 'purchasing';
+  var polite = String(s.polite == null ? '' : s.polite).trim();   // "ค่ะ" / "ครับ" ตามแบบของทีม
   var P = 'style="margin:0 0 4px"';
 
   var h = '<div style="font-family:Tahoma,Arial,sans-serif;font-size:14px;line-height:1.55;color:#222">';
@@ -275,7 +280,7 @@ function buildApprovalHtml_(ss, req, o, s, kind) {
   h += '<p ' + P + '>สำเนา&nbsp;&nbsp;ผู้เกี่ยวข้อง</p>';
   h += '<p ' + P + '>เรื่อง&nbsp;&nbsp;&nbsp;&nbsp;' + (approved ? 'ได้รับการอนุมัติสั่งซื้ออุปกรณ์' : 'ขออนุมัติสั่งซื้ออุปกรณ์') + team + '</p><br>';
   h += '<p ' + P + '>' + (approved ? 'ได้รับการอนุมัติสั่งซื้ออุปกรณ์' : 'ขออนุมัติสั่งซื้ออุปกรณ์') + team +
-    ' ใช้ Budget เดือน ' + esc_(monthText) + ' รายละเอียดตามแนบ</p>';
+    ' ใช้ Budget เดือน ' + esc_(monthText) + ' รายละเอียดตามแนบ' + esc_(polite) + '</p>';
   h += '<p ' + P + '>งบประมาณตาม BG <b>' + fmtBaht_(bgTotal) + '</b> บาท ค่าใช้จ่ายโดยประมาณ <b>' + fmtBaht_(total) + '</b> บาท (ไม่รวม VAT)</p>';
   var overItems = items.filter(function (i) { return i.over; });
   if (overItems.length) {
@@ -283,9 +288,19 @@ function buildApprovalHtml_(ss, req, o, s, kind) {
       esc_(uniq_(overItems.map(function (i) { return i.line.label + ' เดือน ' + THAI_MONTH_FULL[i.month] + (i.overReason ? ' — เหตุผล: ' + i.overReason : ''); })).join(' · ')) +
       '</b></p>';
   }
-  if (o.intro) h += '<p ' + P + '>' + esc_(o.intro).replace(/\n/g, '<br>') + '</p>';
+  // "เบื้องต้นได้ปรึกษาพี่… เรียบร้อยค่ะ" — เติมคำลงท้ายให้ถ้าผู้เขียนไม่ได้ใส่มา
+  if (o.intro) {
+    var intro = String(o.intro).trim();
+    if (polite && intro.slice(-polite.length) !== polite) intro += polite;
+    h += '<p ' + P + '>' + esc_(intro).replace(/\n/g, '<br>') + '</p>';
+  }
   if (req.note) h += '<p ' + P + '>หมายเหตุผู้ขอ: ' + esc_(req.note) + '</p>';
-  if (o.link) h += '<p ' + P + '>โปรดคลิกลิ้งค์ : <a href="' + esc_(o.link) + '">' + esc_(o.link) + '</a></p>';
+  if (o.link) {
+    // ตามอีเมลของทีม: "โปรดคลิกลิ้งค์ : รายการสั่งซื้ออุปกรณ์ 2569 (ทีม Static)"
+    var linkText = String(o.linkText || s.approval_link_text || '').trim() ||
+      ('รายการสั่งซื้ออุปกรณ์ ' + be + (s.team_name ? ' (' + s.team_name + ')' : ''));
+    h += '<p ' + P + '>โปรดคลิกลิ้งค์ : <a href="' + esc_(o.link) + '">' + esc_(linkText) + '</a></p>';
+  }
   h += '<br>';
 
   // sections: สื่อ × หมวด, then month
@@ -322,7 +337,7 @@ function buildApprovalHtml_(ss, req, o, s, kind) {
   h += '<br><table cellspacing="0" cellpadding="0" style="border-collapse:collapse">' +
     '<tr>' + cols.map(function (c) { return '<th ' + th + '>' + esc_(c) + '</th>'; }).join('') + '</tr>';
   items.forEach(function (i) {
-    var status = approved ? 'อนุมัติ' : (i.over ? 'ส่งขออนุมัติ (Over Budget)' : 'ส่งขออนุมัติ');
+    var status = approved ? 'ได้รับการอนุมัติ' : (i.over ? 'ส่งขออนุมัติ (Over Budget)' : 'ส่งขออนุมัติ');
     h += '<tr>' + [
       [td, i.line.company], [td, i.line.mediaType || i.line.mediaGroup], [td, i.line.location || i.line.mediaGroup],
       [td, i.line.expenseGroup || i.line.glName], [td, i.remark], [td, i.name], [tdr, i.qty + (i.unit ? ' ' + i.unit : '')],
@@ -333,7 +348,7 @@ function buildApprovalHtml_(ss, req, o, s, kind) {
   h += '<tr><td ' + td + ' colspan="10"><b>รวม</b></td><td ' + tdr + '><b>' + fmtBaht_(bgTotal) + '</b></td><td ' + tdr + '><b>' +
     fmtBaht_(total) + '</b></td><td ' + td + ' colspan="2"></td></tr></table>';
 
-  h += '<br><p ' + P + '>' + (approved ? 'จึงเรียนมาเพื่อโปรดดำเนินการ' : 'จึงเรียนมาเพื่อโปรดพิจารณา') + '</p>';
+  h += '<br><p ' + P + '>จึงเรียนมาเพื่อโปรดพิจารณา' + esc_(polite) + '</p>';
   if (s.signature) h += '<br><p ' + P + '>' + esc_(s.signature).replace(/\n/g, '<br>') + '</p>';
   h += '<p style="margin:12px 0 0;color:#888;font-size:11px">เลขที่คำขอ ' + esc_(req.request_id) + ' · ผู้ขอ ' +
     esc_(req.requester_name || req.requester_email) + '</p></div>';

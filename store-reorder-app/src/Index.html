@@ -396,8 +396,11 @@
               <label>เรียน<input name="approval_greeting" placeholder="เช่น ผู้บริหาร / คุณวสุ"></label>
               <label>ฝ่ายจัดซื้อ — ถึง<input name="purchasing_to" placeholder="อีเมลฝ่ายจัดซื้อ"></label>
               <label>ฝ่ายจัดซื้อ — สำเนา (CC)<input name="purchasing_cc"></label>
-              <label class="wide">ข้อความเพิ่มเติม (ไม่บังคับ)<textarea name="approval_intro" rows="2"></textarea></label>
-              <label class="wide">ลิงก์แนบ (ไม่บังคับ)<input name="approval_link" placeholder="https://…"></label>
+              <label>คำลงท้าย<select name="polite"><option value="ค่ะ">ค่ะ</option><option value="ครับ">ครับ</option><option value="">ไม่ใส่</option></select></label>
+              <label class="wide">ข้อความเพิ่มเติม — เมลขออนุมัติ (ไม่บังคับ)<textarea name="approval_intro" rows="2" placeholder="เช่น เบื้องต้นได้ปรึกษาพี่เกมส์เรียบร้อย"></textarea></label>
+              <label class="wide">ข้อความเพิ่มเติม — เมลฝ่ายจัดซื้อ (ว่าง = ใช้ข้อความเดียวกับด้านบน)<textarea name="purchasing_intro" rows="2"></textarea></label>
+              <label class="wide">ลิงก์แนบ (ไม่บังคับ)<input name="approval_link" placeholder="https://airtable.com/…"></label>
+              <label class="wide">ชื่อลิงก์ที่แสดง (ว่าง = "รายการสั่งซื้ออุปกรณ์ &lt;ปี พ.ศ.&gt; (ทีม …)")<input name="approval_link_text" placeholder="รายการสั่งซื้ออุปกรณ์ 2569 (ทีม Static)"></label>
               <label class="wide">ลายเซ็นท้ายอีเมล<textarea name="signature" rows="3" placeholder="Thank you,&#10;ชื่อ ตำแหน่ง&#10;Tel."></textarea></label>
               <div class="wide"><button class="btn sm" type="submit">บันทึกการตั้งค่า</button> <span id="settingsStatus" class="hint"></span></div>
             </form>
