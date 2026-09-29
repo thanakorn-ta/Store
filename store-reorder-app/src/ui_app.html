@@ -674,7 +674,8 @@ const hasBudget = () => !!(budgetOpts && budgetOpts.lines && budgetOpts.lines.le
 
 // Store สั่งซื้อจากงบ 3 หมวดนี้เท่านั้น — หมวดอื่น (เช่น ค่าไฟฟ้าป้ายโฆษณา) ซ่อนไว้
 // จับจากชื่อหมวด ไม่ใช่เลข GL เพราะแต่ละบริษัทใช้เลขไม่เหมือนกัน
-const GL_WORDS = ['ซ่อมแซมบำรุงรักษา', 'วัสดุสิ้นเปลือง', 'ซ่อมภาพ'];
+// คำสั้น ๆ เพื่อให้ตรงกับชื่อหมวดจริงทุกแบบ เช่น "ค่าซ่อมแซมบำรุงรักษาป้ายโฆษณา" / "ค่าซ่อมแซ่มบำรุงรักษาฯ" (สะกดต่างกันในไฟล์)
+const GL_WORDS = ['บำรุงรักษา', 'ซ่อมแซ', 'วัสดุสิ้นเปลือง', 'ซ่อมภาพ'];
 const GL_ALL_KEY = 'store-reorder-ai:gl-all';
 let showAllGl = false;
 try { showAllGl = localStorage.getItem(GL_ALL_KEY) === '1'; } catch { /* private mode */ }
@@ -1313,7 +1314,7 @@ function renderGate() {
           <button class="btn">เข้าสู่ระบบ</button> <button type="button" class="btn ghost" data-gate="register">สมัครสมาชิก</button>
         </form>
         <p id="gateErr" class="hint over"></p>
-        ${!DEMO && !GAS ? '<p class="hint try-demo">อยากลองก่อน? <a href="?demo=1">ทดลองใช้งานด้วยข้อมูลตัวอย่าง</a> (Admin และ User — ไม่กระทบระบบจริง)</p>' : ''}</div>`;
+        ${!DEMO && !GAS ? '<p class="hint try-demo">นี่คือระบบจริง · อยากลองก่อนใช้จริง? <a href="?demo=1">เปิดโหมดทดลองด้วยข้อมูลตัวอย่าง</a> (เฉพาะหน้าที่เปิดด้วยลิงก์นี้)</p>' : ''}</div>`;
   const f = $('#loginForm') || $('#regForm');
   f.addEventListener('submit', async e => {
     e.preventDefault();
@@ -1440,7 +1441,7 @@ document.addEventListener('click', e => {
       window.DEMO.reset(); setToken('');
       try { localStorage.removeItem(STORE_KEY); } catch { /* ignore */ }
       location.reload();
-    } else if (a === 'exit') location.href = location.pathname + '?demo=0';
+    } else if (a === 'exit') location.href = location.pathname; // ไม่มี ?demo=1 = ระบบจริง
     return;
   }
   const li = e.target.closest('[data-mail]');

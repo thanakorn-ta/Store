@@ -1,18 +1,15 @@
 // Demo / trial mode switch — runs before app.js.
-//   ?demo=1  turn on (remembered in this browser)   ?demo=0  back to the real system
-// When on, demo/mock.js + demo/server.js (the real src/*.js) + demo/seed.js run the whole
-// backend inside this page with sample data: nothing reaches the real Sheet, Drive or email.
-// The Apps Script copy of the page is always the real system.
+//   ?demo=1 in the address bar = โหมดทดลอง สำหรับหน้านั้นเท่านั้น
+// ปิดหน้าหรือเปิดลิงก์ปกติ = กลับมาใช้ระบบจริงทันที (ไม่จำค่าไว้ในเบราว์เซอร์อีกแล้ว —
+// ก่อนหน้านี้เคยจำไว้ ทำให้เผลอดูข้อมูลตัวอย่างค้างอยู่โดยไม่รู้ตัว)
+// เมื่อเปิดอยู่: demo/mock.js + demo/server.js (โค้ด src/*.js ตัวจริง) + demo/seed.js
+// จะรันทั้งระบบในหน้านี้ด้วยข้อมูลตัวอย่าง ไม่แตะ Google Sheet / Drive / อีเมลจริง
+// หน้าเว็บที่เสิร์ฟจาก Apps Script เป็นระบบจริงเสมอ
 (function () {
   if (typeof google !== 'undefined' && google.script && google.script.run) return;
-  var KEY = 'store-reorder-ai:demo';
-  var q = new URLSearchParams(location.search);
-  var on = false;
-  try {
-    if (q.has('demo')) { if (q.get('demo') === '0') localStorage.removeItem(KEY); else localStorage.setItem(KEY, '1'); }
-    on = localStorage.getItem(KEY) === '1';
-  } catch (e) { on = q.get('demo') === '1'; }
-  if (!on) return;
+  var OLD_KEY = 'store-reorder-ai:demo';
+  try { localStorage.removeItem(OLD_KEY); } catch (e) { /* private mode */ }
+  if (new URLSearchParams(location.search).get('demo') !== '1') return;
   // The tag names are split on purpose: this file is also inlined into the Apps Script page,
   // where a literal opening script tag inside a script block breaks the rest of the page.
   var open = '<scr' + 'ipt src="', close = '"></scr' + 'ipt>';
