@@ -648,3 +648,38 @@ td.bud .pc { font-weight: 400; }
 .stage[open] > .stage-h { border-bottom: 1px solid var(--line); }
 .stage-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 12px; }
 .stage-body .req-card { margin: 0; }
+
+/* ---- หน้าจอของแต่ละขั้นตอน + คู่มือการใช้งาน */
+.stage-chip.all { font-weight: 600; }
+.stage-page { border: 1px solid var(--line); border-radius: 14px; background: var(--surface); padding: 14px 16px; margin-bottom: 14px; }
+.sp-head { display: flex; align-items: center; gap: 12px; }
+.sp-head .sn { width: 34px; height: 34px; border-radius: 50%; background: var(--brand, #4a5ba8); color: #fff;
+  display: grid; place-items: center; font-weight: 700; flex: none; }
+.sp-title { flex: 1; min-width: 0; }
+.sp-title h3 { margin: 0; font-size: 17px; }
+.sp-title .hint { margin: 2px 0 0; }
+.sp-sum { text-align: right; display: flex; flex-direction: column; font-size: 13px; color: var(--muted); white-space: nowrap; }
+.sp-steps { margin: 10px 0 0; padding-left: 22px; font-size: 13.5px; }
+.sp-steps li { padding: 2px 0; }
+.sp-nav { display: flex; justify-content: space-between; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+.help { max-width: 900px; }
+.help-sec { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 14px 18px; margin-bottom: 14px; }
+.help-sec h3 { margin: 0 0 8px; font-size: 16px; }
+.help-sec.intro p { margin: 4px 0; }
+.help-q { padding: 10px 0; border-top: 1px solid var(--line); }
+.help-q:first-of-type { border-top: 0; }
+.help-q h4 { margin: 0 0 4px; font-size: 14px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.help-q h4 .sn { width: 22px; height: 22px; border-radius: 50%; background: var(--brand, #4a5ba8); color: #fff;
+  display: grid; place-items: center; font-size: 12px; flex: none; }
+.help-q ul, .help-sec > ul { margin: 4px 0 0; padding-left: 20px; font-size: 13.5px; }
+.help-q li, .help-sec > ul li { padding: 2px 0; }
+.help-q p { margin: 2px 0; font-size: 13.5px; }
+.help-q.focus { background: #fff8e6; border-radius: 8px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
+.seg-btn { border: 0; background: var(--surface); padding: 6px 14px; cursor: pointer; font: inherit; font-size: 13px; }
+.seg-btn.on { background: var(--brand, #4a5ba8); color: #fff; }
+@media print {
+  .sidenav, .top, .demo-bar, .page-head .top-actions, #bootError { display: none !important; }
+  .help-sec { break-inside: avoid; border: 0; padding: 0 0 8px; }
+  .main { padding: 0; }
+}

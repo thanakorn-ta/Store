@@ -419,6 +419,7 @@ function renderActive() {
   else if (activeTab === 'admin') { members = null; renderAdmin(); } // always fresh: sign-ups arrive any time
   else if (activeTab === 'budget') renderBudget();
   else if (activeTab === 'delivery') { renderDelivery(); loadRequests(); }
+  else if (activeTab === 'help') renderHelp();
 }
 
 // ------------------------------------------------------------ compare table
@@ -1210,6 +1211,7 @@ function applySession(info) {
   const prevId = me && me.id;
   me = info && info.id ? { ...info, email: String(info.email || info.id).toLowerCase() } : info;
   members = null; masterPc = []; requests = []; appSettings = null; // never show the previous user's data
+  helpRole = null; stageFilter = ''; stageSet = false;              // คู่มือ + ขั้นตอน เริ่มตามบทบาทของคนที่เพิ่งเข้ามา
   editingReq = null; composing = null; reqFilterSet = false; selectedReqs.clear(); visibleReqs = [];
   const active = isMember();
   const admin = isAdmin();
@@ -1656,24 +1658,46 @@ function reqBudgetLines(r) {
   });
 }
 
-// หน้าคำขอแบ่งเป็น "ขั้นตอน" ไม่ใช่กองเดียว — แต่ละขั้นบอกว่าตอนนี้รอใคร และฝั่งเราต้องทำอะไร
+// หน้าคำขอ = ทีละขั้นตอน (แต่ละขั้นมีหน้าจอของตัวเอง) — แถบด้านบนใช้สลับขั้น
 const STAGES = [
   { id: 'back', no: 1, title: 'อยู่ที่ผู้ขอ', st: [ST.WAIT_PC, ST.EDIT],
-    admin: 'ส่งกลับให้ผู้ขอ/PC แก้แล้ว — รอเขาส่งกลับมา', user: 'แก้ไขแล้วกด "แก้ไขแล้วส่งใหม่" หรือยืนยันจำนวนให้ Admin' },
+    admin: 'ส่งกลับให้ผู้ขอ/PC แก้แล้ว — รอเขาส่งกลับมา', user: 'แก้ไขแล้วกด "แก้ไขแล้วส่งใหม่" หรือยืนยันจำนวนให้ Admin',
+    adminDo: ['เปิดคำขอดูว่าให้แก้อะไรไว้', 'ถ้าผู้ขอไม่ตอบนาน เตือนทางอีเมล หรือกด "ลบ" ถ้าไม่ใช้แล้ว'],
+    userDo: ['กด "แก้ไขแล้วส่งใหม่" → หน้าสั่งซื้อจะเปิดรายการเดิมให้แก้', 'แก้จำนวน/ราคา/Budget/เดือน แล้วกด "บันทึกและส่งใหม่" (เลขคำขอเดิม)'] },
   { id: 'check', no: 2, title: 'Admin ตรวจ', st: [ST.PENDING, ST.OVER_WAIT],
-    admin: 'ตรวจรายการ + Budget + ใบเสนอราคา → แก้ไข/ส่งกลับ หรือกด "ส่งเมลรายการสั่งซื้อ + Budget"', user: 'ส่งให้ Admin แล้ว — เรียกกลับมาแก้ไขได้จนกว่า Admin จะส่งเมล' },
+    admin: 'ตรวจรายการ + Budget + ใบเสนอราคา → แก้ไข/ส่งกลับ หรือกด "ส่งเมลรายการสั่งซื้อ + Budget"',
+    user: 'ส่งให้ Admin แล้ว — เรียกกลับมาแก้ไขได้จนกว่า Admin จะส่งเมล',
+    adminDo: ['กางดูรายการสินค้า เทียบกับงบของเดือนนั้น (แถบ Budget ในการ์ดบอกยอดคงเหลือให้)',
+      'เปิดใบเสนอราคาที่ผู้ขอแนบมา (ปุ่ม 📎)', 'ข้อมูลผิด → "แก้ไขข้อมูล" (แก้ได้ทุกช่อง) หรือ "ส่งกลับให้ผู้ขอแก้ไข"',
+      'ถูกต้องแล้ว → "ตรวจแล้ว → ส่งเมลรายการสั่งซื้อ + Budget" (ค่าตั้งต้นส่งถึง thanakorn@planbmedia.co.th แนบ Excel + ใบเสนอราคาให้อัตโนมัติ)'],
+    userDo: ['รอ Admin ตรวจ', 'นึกได้ว่าใส่ผิด → "เรียกกลับมาแก้ไข" แล้วส่งใหม่'] },
   { id: 'approve', no: 3, title: 'รอผู้บริหารอนุมัติ', st: [ST.APPROVAL_WAIT],
-    admin: 'ส่งเมลแล้ว — เมื่อได้ "Approved" กด "บันทึก: ได้รับอนุมัติแล้ว"', user: 'รอผลอนุมัติทางอีเมล' },
+    admin: 'ส่งเมลแล้ว — เมื่อได้ "Approved" กด "บันทึก: ได้รับอนุมัติแล้ว"', user: 'รอผลอนุมัติทางอีเมล',
+    adminDo: ['ผู้บริหารตอบ Approved ในอีเมล → กด "บันทึก: ได้รับอนุมัติแล้ว" (ใส่หมายเหตุ เช่น วันที่ตอบ)',
+      'ไม่อนุมัติ → กด "บันทึก: ไม่อนุมัติ" พร้อมเหตุผล ผู้ขอจะได้รับอีเมล', 'ต้องส่งซ้ำ → "ส่งเมลอีกครั้ง"'],
+    userDo: ['รอ — ระบบจะอีเมลแจ้งเมื่อมีผล'] },
   { id: 'po', no: 4, title: 'อนุมัติแล้ว — ออก PR/PO', st: [ST.APPROVED],
-    admin: 'ส่งแจ้งฝ่ายจัดซื้อ → ใส่เลข PR/PO รายชิ้น + กำหนดส่ง (ตัดงบตอนได้เลข PO)', user: 'อนุมัติแล้ว รอฝ่ายจัดซื้อออก PR/PO' },
+    admin: 'ส่งแจ้งฝ่ายจัดซื้อ → ใส่เลข PR/PO รายชิ้น + กำหนดส่ง (ตัดงบตอนได้เลข PO)', user: 'อนุมัติแล้ว รอฝ่ายจัดซื้อออก PR/PO',
+    adminDo: ['กด "ส่งแจ้งฝ่ายจัดซื้อ" (แนบไฟล์ชุดเดียวกับตอนขออนุมัติ)',
+      'ได้เลขมาแล้ว → ในตาราง "PR/PO และการรับของ" ติ๊กรายการ (ทีละชิ้น หรือหลายชิ้นที่ใช้เลขเดียวกัน) ใส่เลข PR/PO + กำหนดส่ง แล้วกดบันทึก',
+      'ของที่เพิ่งได้เลข PO จะถูกตัดงบทันที · ครบทุกชิ้นแล้วคำขอจะย้ายไปขั้นที่ 5'],
+    userDo: ['รอฝ่ายจัดซื้อ — ดูเลข PR/PO และกำหนดส่งได้ในการ์ดคำขอ'] },
   { id: 'wait', no: 5, title: 'รอของมาส่ง', st: [ST.PO],
-    admin: 'ติดตามของ → ติ๊กรายการที่มาถึงแล้วใส่วันที่รับของ', user: 'ออก PR/PO แล้ว — ดูกำหนดส่งได้ที่แท็บติดตามการส่งของ' },
-  { id: 'done', no: 6, title: 'รับของแล้ว', st: [ST.RECEIVED], admin: 'จบขั้นตอน', user: 'ของเข้า Store แล้ว' },
+    admin: 'ติดตามของ → ติ๊กรายการที่มาถึงแล้วใส่วันที่รับของ', user: 'ออก PR/PO แล้ว — ดูกำหนดส่งได้ที่แท็บติดตามการส่งของ',
+    adminDo: ['ของมาถึง → ติ๊กรายการนั้น ใส่วันที่รับของ แล้วกด "รับของแล้ว (รายการที่เลือก)"',
+      'ของมาไม่พร้อมกันได้ — ติ๊กเฉพาะที่มา ที่เหลือยังค้างไว้', 'เลยกำหนดส่งจะขึ้นแถบแดง ดูรวมทุกคำขอได้ที่แท็บ "ติดตามการส่งของ"'],
+    userDo: ['ดูสถานะของที่สั่งได้ที่แท็บ "ติดตามการส่งของ" (กำหนดส่ง / เลยกำหนดกี่วัน)'] },
+  { id: 'done', no: 6, title: 'รับของแล้ว', st: [ST.RECEIVED], admin: 'จบขั้นตอน', user: 'ของเข้า Store แล้ว',
+    adminDo: ['เก็บไว้เป็นประวัติ — ใช้คำนวณระยะเวลาส่งของในแท็บติดตามการส่งของ'], userDo: ['ไปเบิกของที่ Store ได้'] },
   { id: 'closed', no: 7, title: 'ไม่อนุมัติ / ยกเลิก', st: [ST.REJECTED, ST.CANCELLED, ST.PC_REJECTED],
-    admin: 'ปิดแล้ว — ผู้ขอแก้แล้วส่งใหม่ได้', user: 'ปิดแล้ว — แก้ไขแล้วส่งใหม่ได้' }
+    admin: 'ปิดแล้ว — ผู้ขอแก้แล้วส่งใหม่ได้', user: 'ปิดแล้ว — แก้ไขแล้วส่งใหม่ได้',
+    adminDo: ['ไม่ใช้แล้วกด "ลบ" ได้ (คำขอที่ออก PR/PO แล้วลบไม่ได้)'],
+    userDo: ['อยากสั่งใหม่ → กด "แก้ไขแล้วส่งใหม่" แล้วแก้ตามเหตุผลที่ได้รับ'] }
 ];
 const stageOf = r => (STAGES.find(s => s.st.includes(r.status)) || STAGES[1]).id;
-let stageFilter = '';
+const stageById = id => STAGES.find(s => s.id === id);
+let stageFilter = '';   // '' = ดูทุกขั้นรวมกัน · ปกติเปิดมาที่ขั้นที่มีงานรอเรา
+let stageSet = false;
 
 function renderRequests() {
   const admin = isAdmin();
@@ -1682,11 +1706,8 @@ function renderRequests() {
   const f = $('#reqFilter').value;
   const words = $('#reqSearch').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const text = r => [r.request_id, r.requester_name, r.requester_email, r.note, r.budget_label, ...r.items.map(i => i.name + ' ' + i.sku)].join(' ').toLowerCase();
-  const list = requests.filter(r => (!f || (f === 'todo' ? needsMe(r) : r.status === f)) && words.every(w => text(r).includes(w))
-    && (!stageFilter || stageOf(r) === stageFilter));
-
-  // แถบขั้นตอน: นับจากคำขอที่ผ่านตัวกรองค้นหา/สถานะ แต่ยังไม่กรองขั้นตอน (กดเพื่อดูเฉพาะขั้นนั้น)
   const pool = requests.filter(r => (!f || (f === 'todo' ? needsMe(r) : r.status === f)) && words.every(w => text(r).includes(w)));
+
   const byStage = {};
   for (const r of pool) {
     const k = stageOf(r);
@@ -1694,52 +1715,92 @@ function renderRequests() {
     byStage[k].n++; byStage[k].v += Number(r.total) || 0;
     if (needsMe(r)) byStage[k].todo++;
   }
+  // เปิดหน้าคำขอครั้งแรก → ไปที่ขั้นที่มีงานรอเราก่อน
+  if (!stageSet && pool.length) {
+    const first = STAGES.find(s => (byStage[s.id] || {}).todo) || STAGES.find(s => (byStage[s.id] || {}).n);
+    stageFilter = first ? first.id : '';
+    stageSet = true;
+  }
+  const cur = stageById(stageFilter);
+  const list = pool.filter(r => !cur || stageOf(r) === cur.id);
+
   $('#reqDash').innerHTML = `<div class="stage-bar">${STAGES.map(s => {
     const b = byStage[s.id] || { n: 0, v: 0, todo: 0 };
     return `<button class="stage-chip ${stageFilter === s.id ? 'sel' : ''} ${b.todo ? 'todo' : ''} ${b.n ? '' : 'empty'}" data-stage="${s.id}"
       title="${esc(admin ? s.admin : s.user)}"><span class="sn">${s.no}</span>
       <span class="st-title">${esc(s.title)}</span><b>${b.n}</b>${b.todo ? `<span class="dot" title="รอคุณ ${b.todo}">${b.todo}</span>` : ''}
       <span class="st-sum">${b.n ? money(b.v) : '—'}</span></button>`;
-  }).join('')}</div>${stageFilter ? `<button class="link-btn" data-stage="">← ดูทุกขั้นตอน</button>` : ''}`;
+  }).join('')}<button class="stage-chip all ${stageFilter ? '' : 'sel'}" data-stage="">ทุกขั้นตอน <b>${pool.length}</b></button></div>`;
 
-  $('#reqInfo').textContent = `${list.length} คำขอ${admin ? '' : ' ของฉัน / ที่เกี่ยวกับฉัน'}` +
-    (stageFilter ? ` · เฉพาะขั้นที่ ${(STAGES.find(s => s.id === stageFilter) || {}).no}` : '');
+  $('#reqInfo').textContent = (cur ? `ขั้นที่ ${cur.no} — ${cur.title} · ` : 'ทุกขั้นตอน · ') +
+    `${list.length} คำขอ${admin ? '' : ' ของฉัน / ที่เกี่ยวกับฉัน'}`;
   visibleReqs = list.map(r => r.request_id);
   updateBulkBar();
   const banner = serverOutdated ? `<div class="alert-row"><span>${esc(OUTDATED_MSG)}</span></div>` : '';
-  if (!list.length) {
-    $('#reqList').innerHTML = banner + `<div class="empty">${f === 'todo' ? 'ไม่มีงานที่รอคุณ 🎉' : 'ไม่มีคำขอ'}${!admin ? '<br><button class="btn sm" data-go="order">สั่งซื้อตาม Budget</button>' : ''}</div>`;
+
+  if (!cur) { // มุมมองรวม: จัดกลุ่มตามขั้น
+    $('#reqList').innerHTML = banner + (!list.length
+      ? `<div class="empty">${f === 'todo' ? 'ไม่มีงานที่รอคุณ 🎉' : 'ไม่มีคำขอ'}${!admin ? '<br><button class="btn sm" data-go="order">สั่งซื้อตาม Budget</button>' : ''}</div>`
+      : STAGES.map(s => {
+        const rows = list.filter(r => stageOf(r) === s.id);
+        if (!rows.length) return '';
+        const v = rows.reduce((a, r) => a + (Number(r.total) || 0), 0);
+        const todo = rows.filter(needsMe).length;
+        return `<details class="stage" id="stage-${s.id}" open>
+          <summary class="stage-h"><span class="sn">${s.no}</span>
+            <span class="stage-t"><b>${esc(s.title)}</b><span class="hint">${esc(admin ? s.admin : s.user)}</span></span>
+            <span class="stage-sum">${rows.length} คำขอ · ${money(v)}${todo ? ` · <span class="over">รอคุณ ${todo}</span>` : ''}</span></summary>
+          <div class="stage-body">${rows.map(renderReqCard).join('')}</div>
+        </details>`;
+      }).join(''));
+    focusAfterRender(admin);
     return;
   }
-  // จัดการ์ดเข้าแต่ละขั้นตอน ขั้นที่ไม่มีคำขอจะไม่แสดง
-  $('#reqList').innerHTML = banner + STAGES.map(s => {
-    const rows = list.filter(r => stageOf(r) === s.id);
-    if (!rows.length) return '';
-    const v = rows.reduce((a, r) => a + (Number(r.total) || 0), 0);
-    const todo = rows.filter(needsMe).length;
-    return `<details class="stage" id="stage-${s.id}" open>
-      <summary class="stage-h"><span class="sn">${s.no}</span>
-        <span class="stage-t"><b>${esc(s.title)}</b><span class="hint">${esc(admin ? s.admin : s.user)}</span></span>
-        <span class="stage-sum">${rows.length} คำขอ · ${money(v)}${todo ? ` · <span class="over">รอคุณ ${todo}</span>` : ''}</span></summary>
-      <div class="stage-body">${rows.map(renderReqCard).join('')}</div>
-    </details>`;
-  }).join('');
-  if (focusReq) {
-    const el = document.querySelector(`.req-card[data-id="${CSS.escape(focusReq)}"]`);
-    if (el) {
-      el.classList.add('focus'); el.scrollIntoView({ block: 'center' });
-      const r = requests.find(x => x.request_id === focusReq);
-      if (r && r.status === ST.WAIT_PC && (mine(r) || admin) && !editingReq) { editingReq = { id: focusReq, mode: 'pc' }; focusReq = null; renderRequests(); return; }
-    }
-    focusReq = null;
-  }
+
+  // หน้าจอของขั้นนั้นโดยเฉพาะ: หัวข้อ + สิ่งที่ต้องทำ + ปุ่มข้ามไปขั้นอื่น
+  const i = STAGES.indexOf(cur);
+  const prev = STAGES[i - 1], next = STAGES[i + 1];
+  const b = byStage[cur.id] || { n: 0, v: 0, todo: 0 };
+  const steps = (admin ? cur.adminDo : cur.userDo) || [];
+  $('#reqList').innerHTML = banner + `
+    <section class="stage-page">
+      <header class="sp-head">
+        <span class="sn">${cur.no}</span>
+        <div class="sp-title"><h3>${esc(cur.title)}</h3><p class="hint">${esc(admin ? cur.admin : cur.user)}</p></div>
+        <div class="sp-sum"><b>${b.n} คำขอ</b><span>${money(b.v)}</span>${b.todo ? `<span class="over">รอคุณ ${b.todo}</span>` : ''}</div>
+      </header>
+      ${steps.length ? `<ol class="sp-steps">${steps.map(x => `<li>${esc(x)}</li>`).join('')}</ol>` : ''}
+      <div class="sp-nav">
+        ${prev ? `<button class="btn sm ghost" data-stage="${prev.id}">← ${prev.no}. ${esc(prev.title)}</button>` : '<span></span>'}
+        <button class="btn sm ghost" data-help="${cur.id}">📖 วิธีใช้ขั้นนี้</button>
+        ${next ? `<button class="btn sm ghost" data-stage="${next.id}">${next.no}. ${esc(next.title)} →</button>` : '<span></span>'}
+      </div>
+    </section>
+    ${list.length ? `<div class="stage-body">${list.map(renderReqCard).join('')}</div>`
+      : `<div class="empty">ไม่มีคำขอในขั้นนี้${!admin && cur.id === 'check' ? '<br><button class="btn sm" data-go="order">สั่งซื้อตาม Budget</button>' : ''}</div>`}`;
+  focusAfterRender(admin);
 }
 
-$('#reqDash').addEventListener('click', e => {
-  const b = e.target.closest('[data-stage]');
+/** เปิดจากลิงก์ในอีเมล (?req=…) — เลื่อนไปที่การ์ดนั้น และสลับไปขั้นของมันให้ */
+function focusAfterRender(admin) {
+  if (!focusReq) return;
+  const r = requests.find(x => x.request_id === focusReq);
+  if (r && stageFilter && stageOf(r) !== stageFilter) { stageFilter = stageOf(r); renderRequests(); return; }
+  const el = document.querySelector(`.req-card[data-id="${CSS.escape(focusReq)}"]`);
+  if (el) {
+    el.classList.add('focus'); el.scrollIntoView({ block: 'center' });
+    if (r && r.status === ST.WAIT_PC && (mine(r) || admin) && !editingReq) { editingReq = { id: focusReq, mode: 'pc' }; focusReq = null; renderRequests(); return; }
+  }
+  focusReq = null;
+}
+
+document.addEventListener('click', e => {
+  const b = e.target.closest('#reqDash [data-stage], #reqList [data-stage]');
   if (!b) return;
-  stageFilter = b.dataset.stage === stageFilter ? '' : b.dataset.stage;
+  stageFilter = b.dataset.stage;
+  stageSet = true;
   renderRequests();
+  window.scrollTo(0, 0);
 });
 
 /** Admin: tick several requests and delete them in one go (e.g. rounds nobody answered). */
@@ -2859,6 +2920,131 @@ $('#btnDlvExport').addEventListener('click', () => {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'การส่งของ');
   XLSX.writeFile(wb, `ติดตามการส่งของ_${stamp()}.xlsx`);
+});
+
+// ------------------------------------------------------------ คู่มือการใช้งานในตัวแอป (แท็บ "คู่มือการใช้งาน")
+// เนื้อหาขั้นตอนดึงจาก STAGES ชุดเดียวกับหน้าคำขอ — แก้ที่เดียว คู่มือกับหน้าจอจะตรงกันเสมอ
+
+let helpRole = null; // 'user' | 'admin' — ตั้งตามบทบาทของคนที่เข้าสู่ระบบ แล้วสลับดูอีกฝั่งได้
+
+const HELP_START = [
+  { q: 'เข้าสู่ระบบ', a: ['ใส่ ID และรหัสผ่านที่ Admin ให้มา (ยังไม่มี → กด "สมัครสมาชิก" แล้วรอ Admin อนุมัติ)',
+      'ลืมรหัสผ่าน → แจ้ง Admin ให้กด "สร้างรหัสใหม่" ที่หน้าสมาชิก & ตั้งค่า แล้วบอกรหัสใหม่ให้',
+      'ปุ่ม 👁 ท้ายช่องรหัสผ่าน กดดูตัวที่พิมพ์ได้'] },
+  { q: 'อยากลองก่อนใช้จริง', a: ['เปิดลิงก์เดิมแล้วเติม ?demo=1 ท้าย URL — เป็นข้อมูลตัวอย่างในเบราว์เซอร์ของคุณเอง',
+      'ไม่กระทบข้อมูลจริง ไม่ส่งอีเมลจริง · กด "ออกจากโหมดทดลอง" เพื่อกลับมาใช้ระบบจริง'] }
+];
+
+const HELP_USER = [
+  { q: 'สั่งซื้อของ (เริ่มจากงบ ไม่ใช่เริ่มจากของ)', a: [
+      '1) เมนู "สั่งซื้อตาม Budget" → เลือก Budget ที่จะใช้ (แสดงเฉพาะ ค่าซ่อมแซมบำรุงรักษา · ค่าวัสดุสิ้นเปลืองใช้ไป · ค่าซ่อมภาพโฆษณา)',
+      '2) เลือกเดือนที่จะใช้ของ — แถบเดือนบอกยอดคงเหลือของเดือนนั้น',
+      '3) ใส่รายการ: ค้นหาจากของใน Store, กดจากรายการแนะนำ หรือเพิ่มของที่ยังไม่มีใน Store เอง',
+      '4) ใส่ "ขอบเขตการใช้งาน" ของแต่ละรายการ (เช่น ใช้ล้างแกนมอเตอร์ป้าย Metro) — ใช้ขึ้นในอีเมลขออนุมัติ',
+      '5) มีใบเสนอราคาให้แนบไฟล์ (PDF/รูป/Excel/Word ไฟล์ละ ≤ 5 MB รวม ≤ 10 MB ไม่เกิน 5 ไฟล์)',
+      '6) กด "ส่งให้ Admin ตรวจ"'] },
+  { q: 'งบไม่พอ — ขอ Over Budget', a: ['ถ้ายอดเกินงบเดือนนั้น ระบบจะไม่ให้ส่งจนกว่าจะติ๊ก "ขอ Over Budget" และใส่เหตุผล',
+      'เหตุผลจะไปแสดงในอีเมลขออนุมัติ ให้เขียนให้ผู้บริหารเข้าใจ เช่น "ป้ายเสียหลายจุด ต้องซ่อมด่วน"',
+      'อีกทางคือลดจำนวน เปลี่ยนเดือน หรือเปลี่ยน Budget ให้พอ'] },
+  { q: 'ส่งไปแล้วนึกได้ว่าใส่ผิด', a: ['ที่การ์ดคำขอ กด "เรียกกลับมาแก้ไข" (ทำได้ก่อน Admin ส่งเมลขออนุมัติ)',
+      'แก้ในหน้าสั่งซื้อ แล้วกด "บันทึกและส่งใหม่" — ใช้เลขคำขอเดิม ไฟล์แนบเดิมยังอยู่',
+      'ถ้า Admin ส่งกลับมาให้แก้ หรือไม่อนุมัติ ก็กด "แก้ไขแล้วส่งใหม่" ได้เหมือนกัน'] },
+  { q: 'ตามของที่สั่ง', a: ['แท็บ "ติดตามการส่งของ" บอกว่าของชิ้นไหนออก PR/PO แล้ว กำหนดส่งวันไหน เลยกำหนดกี่วัน',
+      'เลขแดงบนเมนูคือจำนวนรายการที่เลยกำหนดส่ง'] }
+];
+
+const HELP_ADMIN = [
+  { q: 'ตรวจคำขอ', a: ['เมนู "ตรวจคำขอสั่งซื้อ" เปิดมาที่ขั้นที่มีงานรอคุณ — แถบด้านบนสลับไปขั้นอื่นได้',
+      'กางดูรายการสินค้า · เปิดใบเสนอราคาด้วยปุ่ม 📎 · แถบ Budget ในการ์ดบอกยอดคงเหลือของงบเดือนนั้น',
+      'ข้อมูลผิด → "แก้ไขข้อมูล" แก้ได้ทุกช่อง (จำนวน ราคา Budget เดือน) ระบบตรวจงบใหม่ให้',
+      'ให้ผู้ขอแก้เอง → "ส่งกลับให้ผู้ขอแก้ไข" พร้อมบอกสิ่งที่ต้องแก้ · ไม่ใช้แล้ว → "ลบ"'] },
+  { q: 'ส่งเมลขออนุมัติ', a: ['กด "ตรวจแล้ว → ส่งเมลรายการสั่งซื้อ + Budget" — ระบบร่างอีเมลตามรูปแบบเดิมให้',
+      'ค่าตั้งต้นส่งถึง thanakorn@planbmedia.co.th (แก้ได้ที่ สมาชิก & ตั้งค่า → ตั้งค่าอีเมล)',
+      'แนบให้อัตโนมัติ: ไฟล์ Excel รายการสั่งซื้อ + Budget และใบเสนอราคาที่ผู้ขอแนบมา (ติ๊กเลือกได้ก่อนส่ง)',
+      'ผู้บริหารตอบ Approved → กด "บันทึก: ได้รับอนุมัติแล้ว"'] },
+  { q: 'ออก PR/PO และรับของ', a: ['กด "ส่งแจ้งฝ่ายจัดซื้อ" แล้วรอเลข PR/PO',
+      'ในตาราง "PR/PO และการรับของ" ติ๊กรายการ — ทีละชิ้น หรือหลายชิ้นที่ใช้เลขเดียวกัน — ใส่เลข PR, PO และกำหนดส่ง แล้วกดบันทึก',
+      'ระบบเติมกำหนดส่งให้ = วันออก PO + ระยะเวลาที่เคยส่งได้จริง (แก้เองได้)',
+      'ของที่เพิ่งได้เลข PO จะตัดงบทันที · ของมาถึงแล้วติ๊กรายการนั้นใส่วันที่รับของ',
+      'คำขอจะเป็น "รับของแล้ว" เมื่อของมาครบทุกรายการ'] },
+  { q: 'สมาชิกและรหัสผ่าน', a: ['สมาชิก & ตั้งค่า → เพิ่ม/อนุมัติ/เปลี่ยนสิทธิ์/ระงับสมาชิก',
+      'รหัสผ่านเก็บแบบเข้ารหัส เปิดดูของเดิมไม่ได้ — กด "สร้างรหัสใหม่" (รายคนหรือทุกคน) แล้วระบบจะแสดงรหัสให้คัดลอกไปแจ้ง',
+      'ใส่อีเมลให้สมาชิกทุกคน ระบบใช้ส่งแจ้งเตือนและจับคู่ผู้รับผิดชอบ PC'] },
+  { q: 'นำเข้าข้อมูล', a: ['ข้อมูล Store 4 ช่อง (MIN/MAX, การใช้ของ, คงเหลือ, จุดสั่งซื้อ) — ลากไฟล์มาวางที่แท็บ "ข้อมูล Store"',
+      'Budget — นำเข้าไฟล์ "Budget STT … Revise-Budget" ที่ สมาชิก & ตั้งค่า (นำเข้าใหม่ทับของเดิม)',
+      'Master PC — ใส่อีเมลผู้รับผิดชอบและหัวหน้าของแต่ละ PC'] }
+];
+
+const HELP_FAQ = [
+  { q: 'กดปุ่มแล้วขึ้นว่า "ยังไม่มีคำสั่งนี้ฝั่ง Apps Script"',
+    a: 'โค้ดฝั่งเซิร์ฟเวอร์ยังเป็นเวอร์ชันเก่า — ให้ผู้ดูแลวางไฟล์ build/apps-script/Code.gs เวอร์ชันใหม่ แล้ว Deploy เวอร์ชันใหม่' },
+  { q: 'ทำไมคงเหลือไม่เท่ากับงบลบค่าใช้จ่าย',
+    a: 'คงเหลือ = งบเดือนนั้น (Revise Budget ถ้ามี) − Actual − คำขอที่รอตรวจ/รออนุมัติ/อนุมัติแล้ว · คำขอที่ "รอผู้ขอแก้ไข" ไม่จองงบ' },
+  { q: 'ไม่เห็นงบที่ต้องการในรายการ',
+    a: 'ปกติแสดงเฉพาะ 3 หมวดที่ Store สั่งซื้อ — ติ๊ก "แสดงทุกหมวดงบ" ที่หน้างบประมาณเพื่อดูทั้งหมด' },
+  { q: 'ลบคำขอไม่ได้',
+    a: 'คำขอที่ออก PR/PO แล้วลบไม่ได้ เพราะตัดงบไปแล้ว — ถ้ายกเลิกจริงให้ติดต่อฝ่ายจัดซื้อและบันทึกไว้ในหมายเหตุ' },
+  { q: 'ของยังไม่มาแต่เลยกำหนดแล้ว',
+    a: 'ดูที่แท็บติดตามการส่งของ → "ต้องตามตอนนี้" ระบบเรียงให้ว่าเลยกำหนดมากที่สุดคืออะไร พร้อมเลข PR/PO ไว้ตามกับฝ่ายจัดซื้อ' }
+];
+
+function helpBlock(title, rows) {
+  return `<section class="help-sec"><h3>${esc(title)}</h3>${rows.map(r => `<div class="help-q"><h4>${esc(r.q)}</h4>
+    ${Array.isArray(r.a) ? `<ul>${r.a.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : `<p>${esc(r.a)}</p>`}</div>`).join('')}</section>`;
+}
+
+function renderHelp() {
+  const role = helpRole || (isAdmin() ? 'admin' : 'user');
+  helpRole = role;
+  document.querySelectorAll('#helpRole .seg-btn').forEach(b => b.classList.toggle('on', b.dataset.hrole === role));
+  const admin = role === 'admin';
+  $('#helpBody').innerHTML = `
+    <section class="help-sec intro">
+      <h3>ระบบนี้ใช้ทำอะไร</h3>
+      <p>รวบรวมการสั่งซื้อของ Store ให้อยู่ที่เดียว: ผู้ใช้เลือกงบ → ใส่รายการ → ส่งให้ Admin ตรวจ → ส่งเมลขออนุมัติ →
+        ออก PR/PO → รับของ ทุกขั้นมีอีเมลแจ้งและตัดงบให้อัตโนมัติ</p>
+      <p class="hint">คุณกำลังอ่านคู่มือ${admin ? 'สำหรับ Admin (ผู้ดูแลระบบ)' : 'สำหรับ User (ผู้ใช้งาน)'} — สลับได้ที่ปุ่มมุมขวาบน</p>
+    </section>
+    ${helpBlock('เริ่มต้นใช้งาน', HELP_START)}
+    ${admin ? helpBlock('งานประจำของ Admin', HELP_ADMIN) : helpBlock('วิธีสั่งซื้อ', HELP_USER)}
+    <section class="help-sec">
+      <h3>7 ขั้นตอนของคำขอ (แต่ละขั้นมีหน้าจอของตัวเอง)</h3>
+      <p class="hint">เปิดแท็บ "${admin ? 'ตรวจคำขอสั่งซื้อ' : 'คำขอของฉัน'}" แล้วกดแถบขั้นตอนด้านบนเพื่อสลับหน้าจอ</p>
+      ${STAGES.map(s => `<div class="help-q" id="help-stage-${s.id}">
+        <h4><span class="sn">${s.no}</span> ${esc(s.title)} <span class="hint">สถานะ: ${s.st.map(esc).join(' · ')}</span></h4>
+        <p>${esc(admin ? s.admin : s.user)}</p>
+        ${((admin ? s.adminDo : s.userDo) || []).length ? `<ul>${(admin ? s.adminDo : s.userDo).map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
+      </div>`).join('')}
+    </section>
+    ${helpBlock('ปัญหาที่พบบ่อย', HELP_FAQ)}
+    <section class="help-sec">
+      <h3>หน้าจออื่น ๆ</h3>
+      <ul>
+        <li><b>งบประมาณ</b> — งบทุกบรรทัดแยกรายเดือน: งบ · ใช้จริง · คำขอที่จองไว้ · คงเหลือ · กดที่แถวเพื่อดูรายเดือน หรือกด "สั่งซื้อในงบนี้"</li>
+        <li><b>รายการแนะนำจาก Store</b> — ของที่ถึงจุดสั่งซื้อพร้อมยอดแนะนำ 3 วิธี · ติ๊กแล้วจะเข้า Budget+เดือนที่เลือกไว้ และมีช่อง "ใส่ในงบ" บอกยอดต่อท้าย</li>
+        <li><b>ติดตามการส่งของ</b> — ของที่ออก PR/PO แล้ว: กำหนดส่ง เทียบกับวันได้รับจริง ระยะส่งเฉลี่ย % ตรงเวลา และรายการที่ต้องตาม</li>
+        ${admin ? '<li><b>สมาชิก & ตั้งค่า</b> — สมาชิก รหัสผ่าน อีเมลส่งรายการสั่งซื้อ Budget และผู้รับผิดชอบแต่ละ PC</li>' : ''}
+      </ul>
+    </section>`;
+}
+
+$('#helpRole').addEventListener('click', e => {
+  const b = e.target.closest('[data-hrole]');
+  if (!b) return;
+  helpRole = b.dataset.hrole;
+  renderHelp();
+});
+$('#btnHelpPrint').addEventListener('click', () => window.print());
+
+// ปุ่ม "📖 วิธีใช้ขั้นนี้" ในหน้าคำขอ → เปิดคู่มือตรงหัวข้อของขั้นนั้น
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-help]');
+  if (!b) return;
+  goTab('help');
+  setTimeout(() => {
+    const el = document.getElementById('help-stage-' + b.dataset.help);
+    if (el) { el.scrollIntoView({ block: 'center' }); el.classList.add('focus'); setTimeout(() => el.classList.remove('focus'), 2000); }
+  }, 60);
 });
 
 // ------------------------------------------------------------ boot

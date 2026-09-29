@@ -62,6 +62,7 @@
       <button class="tab nav-item" data-tab="budget" data-role="all"><svg viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M7 15h4"/></svg><span>งบประมาณ</span></button>
       <button class="tab nav-item" data-tab="delivery" data-role="all"><svg viewBox="0 0 24 24"><path d="M3 7h11v9H3z"/><path d="M14 10h4l3 3v3h-7z"/><circle cx="7" cy="18" r="1.6"/><circle cx="17" cy="18" r="1.6"/></svg><span>ติดตามการส่งของ</span><span id="dlvBadge" class="badge alert" hidden>0</span></button>
       <button class="tab nav-item" data-tab="compare" data-role="all"><svg viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h10"/><path d="M17 17l2 2 3-4"/></svg><span>รายการแนะนำจาก Store</span></button>
+      <button class="tab nav-item" data-tab="help" data-role="all"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.2 2.4c-.7.2-1.2.9-1.2 1.6v.5"/><circle cx="12" cy="17" r=".8" fill="currentColor"/></svg><span>คู่มือการใช้งาน</span></button>
       <div class="nav-group" data-role="admin">ผู้ดูแลระบบ</div>
       <button class="tab nav-item" data-tab="data" data-role="admin"><svg viewBox="0 0 24 24"><path d="M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3z"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg><span>ข้อมูล Store</span></button>
       <button class="tab nav-item" data-tab="merged" data-role="admin"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="1"/><path d="M3 10h18M9 4v16"/></svg><span>ตารางรวมทั้งหมด</span></button>
@@ -316,6 +317,21 @@
 
         <!-- ============ Store suggestions ============ -->
         <!-- ============ ติดตามการส่งของ (PR/PO → ของถึง) ============ -->
+        <!-- ============ คู่มือการใช้งาน ============ -->
+        <div id="tab-help" class="tabpane" hidden>
+          <div class="page-head">
+            <div><h2>คู่มือการใช้งาน</h2><p class="hint">อ่านตามบทบาทของคุณ · ทุกขั้นตอนมีหน้าจอของตัวเองในแท็บคำขอ</p></div>
+            <div class="top-actions">
+              <div class="seg" id="helpRole">
+                <button class="seg-btn" data-hrole="user">สำหรับ User</button>
+                <button class="seg-btn" data-hrole="admin">สำหรับ Admin</button>
+              </div>
+              <button id="btnHelpPrint" class="btn sm ghost">พิมพ์ / บันทึก PDF</button>
+            </div>
+          </div>
+          <div id="helpBody" class="help"></div>
+        </div>
+
         <div id="tab-delivery" class="tabpane" hidden>
           <div class="page-head">
             <div><h2>ติดตามการส่งของ</h2>
