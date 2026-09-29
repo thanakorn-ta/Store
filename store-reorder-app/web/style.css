@@ -683,3 +683,9 @@ td.bud .pc { font-weight: 400; }
   .help-sec { break-inside: avoid; border: 0; padding: 0 0 8px; }
   .main { padding: 0; }
 }
+
+/* ---- ช่อง Remark ในหน้างบประมาณ */
+.remark-cell { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+td[data-remark] { cursor: text; }
+td[data-remark]:hover { background: #fff8e6; }
+.remark-in { width: 100%; min-width: 180px; font: inherit; font-size: 12px; padding: 3px 6px; }

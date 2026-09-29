@@ -2420,6 +2420,30 @@ const BUDGET_GROUPS = {
   company: l => ['co|' + l.company, l.company || '(ไม่ระบุบริษัท)']
 };
 
+// ---- Remark ตาม Budget (มาจากไฟล์ที่นำเข้า · Admin แก้ในหน้านี้ได้ — เก็บในชีต budget_master)
+const monthRemark = (line, m) => String(((line && line.months[m]) || {}).remark || '');
+/** Remark ทั้งหมดของบรรทัดนี้ (ไม่ซ้ำ) — เดือนเดียวเมื่อเลือกเดือน */
+function lineRemarks(line, month) {
+  const out = new Set();
+  for (const m of month ? [month] : MONTHS_1_12) { const r = monthRemark(line, m); if (r) out.add(r); }
+  return [...out];
+}
+function groupRemarks(g, month) {
+  const out = new Set();
+  for (const k of g.keys || []) lineRemarks(budgetLine(k), month).forEach(r => out.add(r));
+  return [...out];
+}
+/** แก้ Remark ได้เมื่อเป็น Admin และแถวนั้นเป็น Budget บรรทัดเดียว (ไม่ใช่กลุ่มรวม) */
+const canEditRemark = g => isAdmin() && (g.keys || []).length === 1 && !!budgetLine(g.keys[0]);
+
+function remarkCell(g, month, cls) {
+  const list = groupRemarks(g, month);
+  const txt = list.join(' / ');
+  const edit = canEditRemark(g);
+  return `<td class="${cls || 'small remark-cell'}" ${edit ? `data-remark="${esc(g.keys[0])}" data-rmonth="${month || 0}" title="คลิกเพื่อแก้ Remark"` : txt ? `title="${esc(txt)}"` : ''}>
+    ${txt ? esc(txt) : `<span class="dim">${edit ? '+ ใส่ Remark' : '–'}</span>`}</td>`;
+}
+
 /** Rows for the current grouping/filters, each with per-month cells and a total for the selected period. */
 function budgetRows() {
   const words = $('#bSearch').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
@@ -2427,11 +2451,12 @@ function budgetRows() {
   const by = BUDGET_GROUPS[$('#bGroup').value] || BUDGET_GROUPS.line;
   const groups = new Map();
   for (const l of budgetLines()) {
-    const text = (l.label + ' ' + l.expenseGroup).toLowerCase();
+    const text = (l.label + ' ' + l.expenseGroup + ' ' + lineRemarks(l).join(' ')).toLowerCase();
     if (!words.every(w => text.includes(w))) continue;
     const [key, label] = by(l);
-    const g = groups.get(key) || { key, label, lines: 0, months: {}, total: zeroCell() };
+    const g = groups.get(key) || { key, label, lines: 0, keys: [], months: {}, total: zeroCell() };
     g.lines++;
+    g.keys.push(l.key);
     for (const m of MONTHS_1_12) g.months[m] = addCell(g.months[m] || zeroCell(), budgetCell(l, m));
     groups.set(key, g);
   }
@@ -2507,7 +2532,7 @@ function renderBudget() {
   $('#bInfo').textContent = `${fmt(rows.length)} แถว`;
   $('#tblBudget').innerHTML = `<thead><tr>
       <th>${esc($('#bGroup').selectedOptions[0].text.replace('แยกตาม', '').replace('รวมตาม', ''))}</th>
-      <th class="n">งบ</th><th class="n">ใช้จริง</th><th class="n">คำขอ (อนุมัติ/รอ)</th><th class="n">คงเหลือ</th><th>ใช้ไป</th></tr></thead>
+      <th class="n">งบ</th><th class="n">ใช้จริง</th><th class="n">คำขอ (อนุมัติ/รอ)</th><th class="n">คงเหลือ</th><th>ใช้ไป</th><th>Remark ตาม Budget</th></tr></thead>
     <tbody>${rows.map(g => {
       const t = g.total;
       const open = budgetOpen === g.key;
@@ -2516,30 +2541,62 @@ function renderBudget() {
             ${budgetLine(g.key) ? `<button class="btn xs" data-order-line="${esc(g.key)}">สั่งซื้อในงบนี้</button>` : ''}</td>
           <td class="n">${fmt(t.plan)}</td><td class="n">${fmt(t.actual)}</td>
           <td class="n">${fmt(t.committed)}${t.pending ? `<div class="pc">รอ ${fmt(t.pending)}</div>` : ''}</td>
-          <td class="n ${t.left < 0 ? 'over' : 'ok'}"><b>${fmt(t.left)}</b></td><td class="bar-cell">${useBar(t)}</td></tr>
-        ${open ? `<tr class="bdetail"><td colspan="6">${budgetMonthTable(g)}</td></tr>` : ''}`;
+          <td class="n ${t.left < 0 ? 'over' : 'ok'}"><b>${fmt(t.left)}</b></td><td class="bar-cell">${useBar(t)}</td>
+          ${remarkCell(g, month)}</tr>
+        ${open ? `<tr class="bdetail"><td colspan="7">${budgetMonthTable(g)}</td></tr>` : ''}`;
     }).join('')}</tbody>
     <tfoot><tr><th>รวม</th><th class="n">${fmt(total.plan)}</th><th class="n">${fmt(total.actual)}</th><th class="n">${fmt(total.committed + total.pending)}</th>
-      <th class="n ${total.left < 0 ? 'over' : 'ok'}">${fmt(total.left)}</th><th>${useBar(total)}</th></tr></tfoot>`;
+      <th class="n ${total.left < 0 ? 'over' : 'ok'}">${fmt(total.left)}</th><th>${useBar(total)}</th><th></th></tr></tfoot>`;
 }
 
 function budgetMonthTable(g) {
   const cur = new Date().getMonth() + 1;
   let run = 0;
-  return `<table class="grid month-table"><thead><tr><th>เดือน</th><th class="n">งบ</th><th class="n">ใช้จริง</th><th class="n">อนุมัติ/PO</th><th class="n">รออนุมัติ</th><th class="n">คงเหลือเดือนนี้</th><th class="n">คงเหลือสะสม</th><th>ใช้ไป</th></tr></thead>
+  return `<table class="grid month-table"><thead><tr><th>เดือน</th><th class="n">งบ</th><th class="n">ใช้จริง</th><th class="n">อนุมัติ/PO</th><th class="n">รออนุมัติ</th><th class="n">คงเหลือเดือนนี้</th><th class="n">คงเหลือสะสม</th><th>ใช้ไป</th><th>Remark</th></tr></thead>
     <tbody>${MONTHS_1_12.map(m => {
       const c = g.months[m];
       run += c.left;
       return `<tr class="${m === cur ? 'now' : ''}"><td>${THAI_MONTH_FULL[m]}${m === cur ? ' <span class="tag st-pending">เดือนนี้</span>' : ''}</td>
         <td class="n">${fmt(c.plan)}</td><td class="n">${fmt(c.actual)}</td><td class="n">${fmt(c.committed)}</td><td class="n">${fmt(c.pending)}</td>
-        <td class="n ${c.left < 0 ? 'over' : ''}">${fmt(c.left)}</td><td class="n ${run < 0 ? 'over' : ''}">${fmt(run)}</td><td class="bar-cell">${useBar(c)}</td></tr>`;
+        <td class="n ${c.left < 0 ? 'over' : ''}">${fmt(c.left)}</td><td class="n ${run < 0 ? 'over' : ''}">${fmt(run)}</td><td class="bar-cell">${useBar(c)}</td>
+        ${remarkCell(g, m)}</tr>`;
     }).join('')}</tbody></table>`;
 }
 
 const fmtK = n => Math.abs(n) >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : Math.abs(n) >= 1e3 ? Math.round(n / 1e3) + 'K' : fmt(n);
 
 ['#bSearch', '#bGroup', '#bMonth', '#bShow'].forEach(s => $(s).addEventListener('input', () => { budgetOpen = null; renderBudget(); }));
+// Admin: คลิกช่อง Remark แล้วพิมพ์ทับได้เลย (เดือนที่เลือกอยู่ หรือทุกเดือนเมื่อดูทั้งปี)
+$('#tblBudget').addEventListener('click', async e => {
+  const cell = e.target.closest('[data-remark]');
+  if (!cell || cell.querySelector('input')) return;
+  e.stopPropagation(); // ไม่ให้ไปกางรายละเอียดรายเดือน
+  const key = cell.dataset.remark, month = Number(cell.dataset.rmonth) || 0;
+  const line = budgetLine(key);
+  const old = month ? monthRemark(line, month) : lineRemarks(line).join(' / ');
+  cell.innerHTML = `<input class="remark-in" value="${esc(old)}" maxlength="300"
+    placeholder="${month ? 'Remark เดือน' + THAI_MONTH_FULL[month] : 'Remark ทุกเดือนของงบนี้'}">`;
+  const inp = cell.querySelector('input');
+  inp.focus(); inp.select();
+  let done = false;
+  const finish = async save => {
+    if (done) return;
+    done = true;
+    const v = inp.value.trim();
+    if (!save || v === old) return renderBudget();
+    inp.disabled = true;
+    try {
+      budgetOpts = await gasCall('saveBudgetRemark', key, month, v);
+      toast(month ? `บันทึก Remark เดือน${THAI_MONTH_FULL[month]} แล้ว` : 'บันทึก Remark ทุกเดือนของงบนี้แล้ว');
+    } catch (err) { toast('บันทึกไม่สำเร็จ: ' + errMsg(err)); }
+    renderBudget();
+  };
+  inp.addEventListener('keydown', ev => { if (ev.key === 'Enter') finish(true); if (ev.key === 'Escape') finish(false); });
+  inp.addEventListener('blur', () => finish(true));
+});
+
 $('#tblBudget').addEventListener('click', e => {
+  if (e.target.closest('[data-remark]')) return;
   const ord = e.target.closest('[data-order-line]');
   if (ord) {
     state.pick = { key: ord.dataset.orderLine, month: Number($('#bMonth').value) || new Date().getMonth() + 1 };
@@ -2578,7 +2635,8 @@ $('#btnBudgetExport').addEventListener('click', () => {
     const c = budgetCell(l, m);
     if (!c.plan && !c.actual && !c.pending && !c.committed) continue;
     out.push({ 'บริษัท': l.company, 'Location': l.location, 'GL Code': l.glCode, 'ประเภท': l.glName, 'Expense Group': l.expenseGroup,
-      'เดือน': m, 'งบ': c.plan, 'ใช้จริง': c.actual, 'อนุมัติ/PO': c.committed, 'รออนุมัติ': c.pending, 'คงเหลือ': Math.round(c.left * 100) / 100 });
+      'เดือน': m, 'งบ': c.plan, 'ใช้จริง': c.actual, 'อนุมัติ/PO': c.committed, 'รออนุมัติ': c.pending, 'คงเหลือ': Math.round(c.left * 100) / 100,
+      'Remark': monthRemark(l, m) });
   }
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(out), 'Budget รายเดือน');
@@ -3022,7 +3080,10 @@ function renderHelp() {
     <section class="help-sec">
       <h3>หน้าจออื่น ๆ</h3>
       <ul>
-        <li><b>งบประมาณ</b> — งบทุกบรรทัดแยกรายเดือน: งบ · ใช้จริง · คำขอที่จองไว้ · คงเหลือ · กดที่แถวเพื่อดูรายเดือน หรือกด "สั่งซื้อในงบนี้"</li>
+        <li><b>งบประมาณ</b> — งบทุกบรรทัดแยกรายเดือน: งบ · ใช้จริง · คำขอที่จองไว้ · คงเหลือ · กดที่แถวเพื่อดูรายเดือน หรือกด "สั่งซื้อในงบนี้"
+          <br><b>Remark ตาม Budget</b> อยู่คอลัมน์สุดท้าย (ค้นหาได้ · มีในไฟล์ส่งออก)${admin
+            ? ' — คลิกที่ช่องแล้วพิมพ์แก้ได้เลย: แก้จากแถวหลัก = ทุกเดือนของงบนั้น, แก้ในตารางรายเดือน = เฉพาะเดือนนั้น (Enter บันทึก / Esc ยกเลิก) · นำเข้าไฟล์ Budget ใหม่จะทับค่าที่แก้ไว้'
+            : ' (แก้ได้เฉพาะ Admin)'}</li>
         <li><b>รายการแนะนำจาก Store</b> — ของที่ถึงจุดสั่งซื้อพร้อมยอดแนะนำ 3 วิธี · ติ๊กแล้วจะเข้า Budget+เดือนที่เลือกไว้ และมีช่อง "ใส่ในงบ" บอกยอดต่อท้าย</li>
         <li><b>ติดตามการส่งของ</b> — ของที่ออก PR/PO แล้ว: กำหนดส่ง เทียบกับวันได้รับจริง ระยะส่งเฉลี่ย % ตรงเวลา และรายการที่ต้องตาม</li>
         ${admin ? '<li><b>สมาชิก & ตั้งค่า</b> — สมาชิก รหัสผ่าน อีเมลส่งรายการสั่งซื้อ Budget และผู้รับผิดชอบแต่ละ PC</li>' : ''}

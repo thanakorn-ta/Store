@@ -99,7 +99,7 @@ var MEMBER_FNS = [
   // shared Store data
   'getStoreData', 'saveDataFile', 'removeDataFile',
   // budget + requests (workflow)
-  'getBudgetOptions', 'importBudget', 'importBudgetFromDrive', 'submitOrderRequest', 'createRound', 'confirmRequest', 'rejectByPc',
+  'getBudgetOptions', 'importBudget', 'importBudgetFromDrive', 'saveBudgetRemark', 'submitOrderRequest', 'createRound', 'confirmRequest', 'rejectByPc',
   'cancelMyRequest', 'decideRequest', 'requestOverBudget', 'managerDecision', 'issuePo', 'markReceived',
   'getApprovalDraft', 'sendApprovalEmail', 'recordApproval', 'sendPurchasingEmail', 'getAppSettings', 'saveAppSettings',
   'recallRequest', 'returnForEdit', 'adminUpdateRequest', 'deleteRequest', 'getQuoteFile',
@@ -2184,6 +2184,40 @@ function writeBudgetMaster_(rows) {
   } finally {
     lock.releaseLock();
   }
+}
+
+/**
+ * Admin writes the Remark of one budget line - one month, or every month of that line
+ * when month is 0. Remark ตาม Budget มาจากไฟล์ที่นำเข้า แก้ในแอปได้ด้วย
+ * (นำเข้าไฟล์ Budget ใหม่จะทับค่าที่แก้ไว้)
+ */
+function saveBudgetRemark(key, month, remark) {
+  var me = requireAdmin_();
+  key = String(key || '');
+  month = Number(month) || 0;
+  remark = String(remark == null ? '' : remark).slice(0, 300);
+  if (!key) throw new Error('ไม่พบรายการ Budget');
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  var n = 0;
+  try {
+    var ss = db_();
+    var h = ensureHeader_(ss, CONFIG.SHEETS.BUDGET, BUDGET_HEADER);
+    var values = h.sheet.getDataRange().getValues();
+    var col = {};
+    h.header.forEach(function (k, i) { col[k] = i; });
+    for (var r = 1; r < values.length; r++) {
+      if (String(values[r][col.key]) !== key) continue;
+      if (month && Number(values[r][col.month_number]) !== month) continue;
+      h.sheet.getRange(r + 1, col.remark + 1).setValue(remark);
+      n++;
+    }
+  } finally {
+    lock.releaseLock();
+  }
+  if (!n) throw new Error('ไม่พบรายการ Budget นี้ในฐานข้อมูล');
+  logActivity_('saveBudgetRemark', 'ok', me.email + ' ' + key + ' เดือน ' + (month || 'ทุกเดือน') + ' (' + n + ' แถว)');
+  return getBudgetOptions();
 }
 
 function budgetLabel_(b) {
